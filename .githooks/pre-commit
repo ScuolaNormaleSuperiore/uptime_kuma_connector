@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Secrets first: it is the check that must never be skipped.
+"$repo_root/.githooks/check-staged-secrets.sh"
+"$repo_root/.githooks/check-staged-python.sh"
+"$repo_root/.githooks/run-unit-tests.sh"

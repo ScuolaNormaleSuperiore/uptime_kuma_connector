@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[KUMA-CONN commit-msg] Checking commit message..." >&2
+
+# `grep -Eiq`, not `rg`. The sibling plugin's version of this hook used ripgrep,
+# and where ripgrep is absent the command exits 127, the `if` reads that as "no
+# match", `set -e` does not fire because the failure is in a condition, and the
+# hook exits 0 — the check passes without ever having run. That is tracked as a
+# defect there; there is no reason to reproduce it here. `grep` needs nothing
+# beyond what the other hooks already assume.
+if grep -Eiq '^Co-Authored-By:[[:space:]]*(Claude|ChatGPT|Codex|OpenAI)\b' "$1"; then
+	echo "Commit blocked: remove AI Co-Authored-By trailer(s)." >&2
+	exit 1
+fi
+
+exit 0

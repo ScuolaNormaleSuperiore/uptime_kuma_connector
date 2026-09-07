@@ -1,0 +1,10 @@
+{
+    "name": "Uptime Kuma Connector",
+    "version": "0.0.1",
+    "description": "Lets the assistant answer whether an ICT service is currently up, reading monitor state from an Uptime Kuma instance on demand. Read-only: it writes nothing back.",
+    "author_name": "Servizi Informativi SNS",
+    "author_url": "https://ict.sns.it",
+    "plugin_url": "https://github.com/ScuolaNormaleSuperiore/uptime_kuma_connector",
+    "tags": "uptime kuma, status, monitoring, helpdesk, chatbot",
+    "thumb": "https://raw.githubusercontent.com/ScuolaNormaleSuperiore/uptime_kuma_connector/main/logo.png"
+}

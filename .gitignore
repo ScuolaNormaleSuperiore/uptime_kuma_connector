@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test and tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Release packages
+dist/
+
+# Local AI instruction symlinks and private dev content
+AGENTS.md
+AGENTS.MD
+CLAUDE.md
+CLAUDE.MD
+DEV
+DEV/
+
+# Instance configuration, written by Cheshire Cat and edited from its admin
+# panel: it belongs to the installation, not to the plugin. The core recreates
+# it from the defaults in settings.py the first time the plugin is activated.
+#
+# It matters more here than in an ordinary plugin: this is where the Uptime Kuma
+# instance URL, the status page slug and — if the admin field is used instead of
+# the environment variable — the push token end up.
+#
+# Anchored to the repository root, so a settings.json elsewhere stays visible.
+/settings.json
