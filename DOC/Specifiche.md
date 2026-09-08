@@ -1,10 +1,14 @@
 # Uptime Kuma Connector — Specifiche
 
-Versione `0.0.1`. **Nessuna funzionalità è implementata**: il codice è stato
-svuotato deliberatamente e questo documento è la specifica da cui costruirlo.
+Versione `0.0.1`. **La configurazione è implementata, il comportamento no.** Il
+pannello espone i due campi di cui alla sezione 5, li valida, e l'adapter decide
+se il connettore è utilizzabile e segnala nel log i problemi di configurazione.
+Nessuna chiamata a Uptime Kuma viene ancora fatta, nessun tool è registrato, e
+nessuna domanda riceve risposta.
 
-Stato dei file: moduli, firme e struttura dei test esistono e sono vuoti; il
-pannello di amministrazione espone una scheda impostazioni senza campi.
+Implementato: `settings.py` con i due validatori, `kuma_client.normalise_name()`
+e `kuma_client.parse_alias_map()`, `load_settings()`, `is_usable()`. Il resto è
+firma con corpo neutro.
 
 **Questo documento è autoportante.** Rende inutile
 `DEV/TODO/RIUSO-INTEGRAZIONE-KUMA.md`, la specifica dell'integrazione Kuma già
@@ -144,10 +148,33 @@ L'autenticazione ha una forma non ovvia, ed è la convenzione di Uptime Kuma:
 Authorization: Basic base64(":" + API_KEY)
 ```
 
-**HTTPS è un vincolo, non una preferenza.** La chiave viaggia in un header Basic
-Auth e base64 è una codifica, non una cifratura: su HTTP semplice la credenziale
-transita in chiaro. Un'istanza raggiungibile solo in HTTP richiede una decisione
-messa a verbale, non un validatore allentato in silenzio.
+**HTTP è accettato, e questa è la decisione messa a verbale.** La chiave viaggia
+in un header Basic Auth e base64 è una codifica, non una cifratura: su HTTP
+semplice la credenziale transita in chiaro, leggibile da qualunque cosa veda il
+traffico.
+
+Si accetta comunque, per due ragioni. La prima è che l'istanza Kuma potrebbe
+essere raggiunta su una **rete privata** — se gira sullo stesso host Docker,
+l'URL è il nome del servizio, `http://uptime-kuma:3001`, e il traffico non lascia
+mai la rete virtuale del container: chi può intercettarlo è già dentro l'host,
+dove ha problemi peggiori a disposizione. La seconda è che rifiutare HTTP
+spingerebbe l'URL in un posto che nessuno valida.
+
+**Non deve però diventare invisibile:** il validatore accetta `http://`, e
+l'adapter registra un warning nel log quando l'URL configurato non è HTTPS. Una
+casella «accetto» nel pannello sarebbe peggio — si spunta una volta e si
+dimentica, mentre una riga di log ricompare.
+
+**Da escludere, ed è la peggiore delle tre opzioni:** HTTPS con la verifica del
+certificato disattivata. Espone la chiave esattamente come HTTP a chi si mette
+in mezzo, e in più fa credere che il canale sia protetto. Se si rinuncia ai
+certificati, si rinuncia in chiaro. Per un'istanza con certificato di una CA
+privata la soluzione corretta è far fidare il container di quella CA, non
+abbassare la verifica.
+
+**Punto aperto:** dove giri Kuma rispetto a Cheshire Cat non è ancora
+determinato, quindi non è deciso se HTTP resti la configurazione normale o solo
+una possibilità. Vedi sezione 8.
 
 ### 2.4 Quattro stati, e la manutenzione non è un guasto
 
@@ -466,8 +493,20 @@ Nel pannello, sotto *Plugins → Uptime Kuma Connector → Settings*:
 
 | Campo | Default | Note |
 | --- | --- | --- |
-| URL dell'istanza Uptime Kuma | vuoto | Vuoto **disabilita** il connettore. Deve essere HTTPS |
-| Mappa degli alias, opzionale | vuoto | Una voce per riga, `alias, alias: id, id` — sezione 3.2 |
+| URL dell'istanza Uptime Kuma | vuoto | Vuoto **disabilita** il connettore. Preferire HTTPS |
+| Mappa degli alias, opzionale | vuoto | Casella **multiriga**, una voce per riga: `alias, alias: id, id` — sezione 3.2 |
+
+La mappa degli alias chiede al pannello una casella multiriga, perché il formato
+è una voce per riga e un'installazione con una decina di servizi sarebbe
+altrimenti da modificare dentro un campo a riga singola che scorre di lato.
+
+Il modo per chiederlo ha una trappola, e viene dal plugin `rag-guardrails`: il
+pannello legge `extra.type` dallo schema JSON pubblicato, quindi il marcatore va
+annidato dentro un oggetto `extra` mentre `type` conserva il suo valore reale,
+`string`. Scriverlo direttamente come `type` **sostituisce** il tipo, pubblica
+qualcosa che non è un tipo JSON Schema valido e mette il marcatore dove il
+pannello non guarda: il campo torna a riga singola e nessuno segnala niente.
+Due test coprono le due metà.
 
 Nell'ambiente, mai nel pannello:
 
@@ -572,7 +611,13 @@ formale.
    l'istanza: il nome deve contenere il termine con cui gli utenti chiamano il
    servizio. È il prerequisito che rende il livello automatico della sezione 3.2
    utile invece che decorativo.
-5. **Scegliere la licenza** e aggiungere il file: il registry richiede software
+5. **Determinare dove gira Kuma rispetto a Cheshire Cat.** Se è sullo stesso
+   host Docker, l'URL diventa il nome del servizio su rete interna e la
+   questione del certificato scompare. Se è su un'altra macchina, HTTP fa
+   attraversare la chiave in chiaro alla rete di ateneo, e va deciso se
+   accettarlo o dotare l'istanza di un certificato. Il codice funziona in
+   entrambi i casi: cambia solo cosa dice questo documento. Vedi 2.3.
+6. **Scegliere la licenza** e aggiungere il file: il registry richiede software
    open source, e oggi manca.
 
 ## 9. Cosa non si replica dall'integrazione esistente, e perché

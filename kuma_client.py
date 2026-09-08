@@ -30,13 +30,128 @@ STATUS_UP = 1
 STATUS_PENDING = 2
 STATUS_MAINTENANCE = 3
 
-# The three outcomes the module can return. `unknown` is not an error state: it
-# is the honest answer when Uptime Kuma cannot be read or does not know the
-# service, and keeping it distinct from `down` is the point of the whole design.
-# See Specifiche.md, section 4.
+# The four outcomes the module can return. `unknown` is not an error state: it
+# is the honest answer when Uptime Kuma cannot be read, and keeping it distinct
+# from `down` is the point of the whole design. `not_monitored` is a *separate*
+# answer and never a synonym: "no check exists for that service" is certain,
+# while `unknown` is our own malfunction. See Specifiche.md, section 4.
 OUTCOME_KNOWN = "known"
 OUTCOME_NOT_MONITORED = "not_monitored"
+OUTCOME_AMBIGUOUS = "ambiguous"
 OUTCOME_UNKNOWN = "unknown"
+
+# Above this many matching monitors the request does not identify a service, and
+# the outcome is `ambiguous` rather than a sentence carrying dozens of names
+# into the prompt. A project value, to revisit against a real instance.
+MAXIMUM_REPORTED_MATCHES = 5
+
+# Removed before comparing names, so "UGOV" finds "U-GOV - Autenticazione" on
+# its own and a whole class of aliases never has to be written by hand.
+_INSIGNIFICANT_CHARACTERS = str.maketrans("", "", "-._")
+
+
+def normalise_name(value: str) -> str:
+    """Fold a service name to the form every comparison is made on.
+
+    Applied to all three sides — what the user asked, the monitor names, and the
+    alias keys — so they are always compared in the same shape. See
+    Specifiche.md, section 3.2.
+
+    The order is load-bearing: the insignificant characters go first, because
+    removing them from "U-GOV - Autenticazione" leaves a double space that the
+    whitespace pass then has to collapse.
+    """
+    without_punctuation = str(value or "").translate(_INSIGNIFICANT_CHARACTERS)
+    return " ".join(without_punctuation.split()).casefold()
+
+
+def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, ...]]:
+    """Read the admin panel's alias map into `{normalised alias: monitor ids}`.
+
+    Returns `(aliases, problems)`. The problems are human-readable lines for the
+    adapter to log: this module does no I/O, so it reports rather than logs.
+
+    Format, one entry per line, aliases left of the colon and monitor ids right
+    of it:
+
+        U-GOV, UGOV, Ugov: 12
+        Esse3, Segreteria online: 14, 15, 16
+        # a comment
+        VPN: 17
+
+    **A malformed line is discarded on its own and never abandons the rest.**
+    That is the whole reason this function exists instead of a one-line parse:
+    the core reads `requirements.txt` by calling `packaging.Requirement()` in a
+    loop inside a `try` that gives up on the entire list at the first bad line,
+    installing nothing at all. The same mistake here would disable the
+    resolution of every service because of one stray character.
+
+    Several ids for one alias is intended, not tolerated: it is how an
+    administrator groups the components of a service explicitly, without
+    depending on how they were named. It resolves to a multiple match.
+
+    A conflicting alias keeps the **first** definition, and the later one is
+    reported: silently overriding would make the order of the lines a hidden
+    rule. A *harmless* duplicate is not reported at all — writing both "U-GOV"
+    and "UGOV" on one line is the natural thing to do, and normalisation makes
+    them the same key with the same ids. Only a repeat that would resolve to
+    different monitors is a problem worth a log line.
+    """
+    aliases: dict[str, tuple[int, ...]] = {}
+    problems: list[str] = []
+
+    for number, raw_line in enumerate(str(text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if ":" not in line:
+            problems.append(f"line {number}: no ':' separating aliases from ids")
+            continue
+
+        raw_aliases, raw_ids = line.split(":", 1)
+
+        names = [normalise_name(part) for part in raw_aliases.split(",")]
+        names = [name for name in names if name]
+        if not names:
+            problems.append(f"line {number}: no alias before the ':'")
+            continue
+
+        monitor_ids: list[int] = []
+        malformed_id = None
+        for part in raw_ids.split(","):
+            candidate = part.strip()
+            if not candidate:
+                continue
+            try:
+                monitor_ids.append(int(candidate))
+            except ValueError:
+                malformed_id = candidate
+                break
+
+        # One bad id discards the line rather than half of it: a partially
+        # applied alias would answer about some components of a service and stay
+        # silent about others, which is worse than not applying it.
+        if malformed_id is not None:
+            problems.append(f"line {number}: '{malformed_id}' is not a monitor id")
+            continue
+
+        if not monitor_ids:
+            problems.append(f"line {number}: no monitor id after the ':'")
+            continue
+
+        for name in names:
+            existing = aliases.get(name)
+            if existing is not None:
+                if existing != tuple(monitor_ids):
+                    problems.append(
+                        f"line {number}: alias '{name}' already points at "
+                        f"{list(existing)}, this line is ignored"
+                    )
+                continue
+            aliases[name] = tuple(monitor_ids)
+
+    return aliases, tuple(problems)
 
 
 def metrics_url(base_url: str) -> str:

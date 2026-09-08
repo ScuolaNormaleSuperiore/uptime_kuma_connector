@@ -1,7 +1,10 @@
 """Uptime Kuma Connector: Cheshire Cat adapter.
 
-**Nothing is wired.** The plugin loads, exposes an empty settings tab, and does
-nothing else. The specification to rebuild it from is `DOC/Specifiche.md`.
+**The configuration is wired; the behaviour is not.** The plugin loads, exposes
+the two settings the specification calls for, reads and validates them, decides
+whether the connector is usable, and reports configuration problems in the log.
+It still makes no request to Uptime Kuma and answers no question. The
+specification is `DOC/Specifiche.md`.
 
 What is deliberately absent, and must stay absent until it is implemented:
 
@@ -31,9 +34,11 @@ from cat.log import log
 from cat.mad_hatter.decorators import plugin
 
 try:
-    from .settings import UptimeKumaConnectorSettings
+    from . import kuma_client
+    from .settings import SECURE_SCHEME, UptimeKumaConnectorSettings
 except ImportError:  # pragma: no cover - depends on how the module is loaded
-    from settings import UptimeKumaConnectorSettings
+    import kuma_client
+    from settings import SECURE_SCHEME, UptimeKumaConnectorSettings
 
 # Read from the environment and never from the admin panel: the core persists
 # settings to settings.json in clear text, and this key grants read access to
@@ -56,27 +61,112 @@ def resolve_api_key() -> str:
 
 
 def load_settings(cat) -> UptimeKumaConnectorSettings:
-    """Read and validate the settings, never raising.
+    """Read and validate the settings, **never raising**.
 
-    Not implemented. When it is: a configuration problem must not take the turn
-    down, so this catches everything and falls back to the model defaults, which
-    are a working "not configured" state.
+    A configuration problem must not take the turn down, so every failure ends
+    in the model defaults, which are a working "not configured" state: no
+    instance URL, connector disabled, no network call attempted.
+
+    Validating through the model rather than reading the raw dictionary is what
+    makes a new setting work immediately on an existing installation: the model
+    supplies the default of any absent field. The field shows up empty in the
+    admin form until the form is saved once, which is a rendering detail rather
+    than a missing value.
     """
-    return UptimeKumaConnectorSettings()
+    try:
+        stored = cat.mad_hatter.get_plugin().load_settings()
+    except Exception as failure:  # the core, the file, or the plugin lookup
+        log.warning(
+            "[uptime-kuma] could not read the stored settings "
+            f"({type(failure).__name__}); the connector stays disabled."
+        )
+        return UptimeKumaConnectorSettings()
+
+    try:
+        settings = UptimeKumaConnectorSettings(**(stored or {}))
+    except Exception as failure:
+        # Reachable when settings.json was edited by hand or written by an
+        # older version of the model: the strict base_url validator refuses it
+        # on read as it would on save. Disabling the connector is the safe
+        # answer; raising here would break a conversation over a typo.
+        log.warning(
+            "[uptime-kuma] the stored settings are not valid "
+            f"({type(failure).__name__}); the connector stays disabled."
+        )
+        return UptimeKumaConnectorSettings()
+
+    report_configuration_problems(settings)
+    return settings
 
 
 def is_usable(settings: UptimeKumaConnectorSettings) -> bool:
     """The single point that decides whether the connector can be used.
 
-    Not implemented. It must answer on the instance URL **and** the API key
-    together, and every path must go through it.
+    Answers on the instance URL **and** the API key together, and every path
+    must go through it — including any future switch, which belongs inside this
+    function rather than beside it.
 
     One function rather than two checks scattered around, because in an
     analogous integration already in production it happened twice that one place
     tested only the identifier and showed a monitoring indicator with the
     integration switched off. See Specifiche.md, section 5.
     """
-    return False
+    return bool(settings.base_url) and bool(resolve_api_key())
+
+
+def alias_map(settings: UptimeKumaConnectorSettings) -> dict:
+    """The configured aliases, as `{normalised alias: monitor ids}`.
+
+    The parsing lives in `kuma_client` because it is pure logic; this wrapper
+    exists so callers never see the problem list they are not going to log.
+    """
+    aliases, _problems = kuma_client.parse_alias_map(settings.alias_map)
+    return aliases
+
+
+# Remembers what was already reported, so a problem is logged when it appears
+# rather than on every turn. Module state resets when the core reloads the
+# plugin, which is the moment a fresh report is wanted anyway.
+_reported_configuration = None
+
+
+def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None:
+    """Log what is wrong with the configuration, once per change.
+
+    This is the only channel an administrator has. The panel cannot show a
+    problem found while reading — the alias map is accepted on save on purpose,
+    so that one bad line does not disable every other service — and the
+    sentences that reach the model never carry configuration detail, because
+    they are text a user may read.
+
+    Logging on every turn would drown it, so the report is memoised on the
+    values it describes: saving the form produces a fresh report on the next
+    turn, and an unchanged configuration stays quiet.
+    """
+    global _reported_configuration
+
+    signature = (settings.base_url, settings.alias_map)
+    if signature == _reported_configuration:
+        return
+    _reported_configuration = signature
+
+    if settings.base_url and not settings.base_url.lower().startswith(
+        f"{SECURE_SCHEME}:"
+    ):
+        # Accepted, but never silently: the API key travels as
+        # `base64(":" + key)` in a Basic Auth header, which is an encoding and
+        # not encryption, so on plain HTTP the credential is readable by
+        # anything that sees the traffic. Negligible on a container network,
+        # real across a campus LAN. See Specifiche.md, section 2.3.
+        log.warning(
+            "[uptime-kuma] the instance URL is not HTTPS: the API key will "
+            "travel in clear text on every call. Acceptable only if that "
+            "traffic never leaves a private network."
+        )
+
+    _aliases, problems = kuma_client.parse_alias_map(settings.alias_map)
+    for problem in problems:
+        log.warning(f"[uptime-kuma] alias map, {problem}")
 
 
 def service_status(service_name, cat):
@@ -96,15 +186,21 @@ def service_status(service_name, cat):
 
 @plugin
 def activated(plugin):
-    """Announce that the plugin loaded, and that it does nothing yet.
+    """Announce that the plugin loaded, and how far the implementation got.
 
     `activated` rather than `after_cat_bootstrap`, and the two are not
     interchangeable: `after_cat_bootstrap` runs once when the core starts, so it
     says nothing about a plugin switched on later from the admin panel — which
     is exactly when the code on disk is re-read and a load failure happens.
+
+    It reads no settings: `activated` receives the plugin rather than the `cat`
+    object, and a network call or a settings read here would put work in front
+    of an administrator clicking a switch. The configuration is reported on the
+    first turn that reads it instead.
     """
     log.info(
-        "[uptime-kuma] plugin activated. No functionality is implemented: no "
-        "tool is registered, no hook is registered, and no request is made to "
-        "Uptime Kuma. See DOC/Specifiche.md for the specification to build."
+        "[uptime-kuma] plugin activated. Settings are wired and validated; no "
+        "behaviour is implemented yet: no tool is registered, no hook is "
+        "registered, and no request is made to Uptime Kuma. See "
+        "DOC/Specifiche.md for the specification to build."
     )

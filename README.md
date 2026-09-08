@@ -10,9 +10,9 @@ device — the most common question at a first-level help desk, and the one the
 assistant currently has no data for. It answers with the right procedure to a
 user whose actual problem is that the service is down.
 
-> **Status: skeleton, nothing is implemented.** The code has been deliberately
-> emptied: no tool is registered, no hook is registered, and no request is made
-> to Uptime Kuma. The plugin loads and shows an empty settings tab.
+> **Status: the configuration works, the behaviour does not.** The settings are
+> declared, validated and read; no tool is registered, no hook is registered,
+> and no request is made to Uptime Kuma yet.
 >
 > The specification to rebuild it from is
 > [`DOC/Specifiche.md`](DOC/Specifiche.md), in Italian.
@@ -104,7 +104,12 @@ enough to read. It is taken from the sibling `rag-guardrails` plugin.
 
 ## Configuration
 
-`Plugins → Uptime Kuma Connector → Settings` — currently empty, by design.
+`Plugins → Uptime Kuma Connector → Settings`
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| Instance URL | empty | Empty disables the connector. HTTPS preferred; HTTP is accepted and warned about in the log, because the instance may sit on a private network |
+| Alias map | empty | Optional, one entry per line: `alias, alias: id, id` |
 
 When implemented: the instance URL, and an optional alias map for the cases
 where a monitor name is not enough — one entry per line, `alias, alias: id, id`.
