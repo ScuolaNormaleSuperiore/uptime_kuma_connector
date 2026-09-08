@@ -22,19 +22,25 @@ alone is enough: no running Cheshire Cat, no container.
     python -m pytest
 
 The Cat imports every `.py` in the plugin folder, this file included, under a
-package name where a bare `import kuma_client` does not resolve — which would
-make the core log a plugin load error on every activation. Putting the plugin
-folder on the path fixes that without weakening the import: a genuine breakage
-still fails the tests instead of skipping them.
+package name where a bare `import kuma_client` does not resolve. The path fix
+below is therefore guarded so that it runs under `pytest` and never inside the
+core process — the full reasoning is in `tests/integration/test_connector.py`.
+It does not weaken the import: a genuine breakage still fails the tests instead
+of skipping them.
 """
 
 import ast
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Guarded for the reason spelled out in `tests/integration/test_connector.py`:
+# under the name the Cat imports this file with, the path fix would make our
+# `settings.py` answer a bare `import settings` from a neighbouring plugin. It
+# runs under `pytest` and nowhere else.
+if not __name__.startswith("cat.plugins."):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import kuma_client  # noqa: E402  (import after the path fix, on purpose)
+    import kuma_client  # noqa: E402  (import after the path fix, on purpose)
 
 
 class TestModuleContract:

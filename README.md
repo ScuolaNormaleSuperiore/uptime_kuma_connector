@@ -48,9 +48,11 @@ state because it redraws constantly; a chatbot asks once, when someone asks, and
 the answer has to be true *then*. A forty-second-old status is worse than none,
 because it is indistinguishable from a current one.
 
-**The API key comes from the environment**, `UPTIME_KUMA_API_KEY`, and there is
-no settings field for it — the core persists settings to `settings.json` in
-clear text, and this key grants read access to the whole monitoring system.
+**Everything is configured in the admin panel, the API key included.** One
+place, one person, no deployment change to make the plugin work. The cost is
+stated rather than hidden: the core writes settings to `settings.json` in clear
+text, so the key must be a read-only one and it must be rotated if that folder
+is ever copied. See *Configuration* below.
 
 **All four Uptime Kuma statuses stay distinct**: down, up, pending, maintenance.
 Collapsing them into up/down would announce planned maintenance as a fault, and
@@ -103,16 +105,105 @@ The invariant, in four words: **never invent a state.**
 
 ## Configuration
 
-`Plugins → Uptime Kuma Connector → Settings`
+Everything lives in one place: **Plugins → Uptime Kuma Connector → Settings** in
+the Cheshire Cat admin panel. There is no environment variable to set, no file
+to edit and no container to restart.
 
-| Field | Default | Notes |
-| --- | --- | --- |
-| Instance URL | empty | Empty disables the connector. HTTPS preferred; HTTP is accepted and warned about in the log, because the instance may sit on a private network |
-| Alias map | empty | Optional, one entry per line: `alias, alias: id, id` |
+Three fields. Two are required to reach Uptime Kuma at all; the third is
+optional and only matters when a monitor's name is not what users call it.
 
-When implemented: the instance URL, and an optional alias map for the cases
-where a monitor name is not enough — one entry per line, `alias, alias: id, id`.
-The API key is **not** a setting; it comes from `UPTIME_KUMA_API_KEY`.
+| Field | Required | Default | What it does |
+| --- | --- | --- | --- |
+| **Uptime Kuma: URL istanza** | yes | empty | The base URL of the instance, without `/metrics`. Empty disables the connector |
+| **Uptime Kuma: API key** | yes | empty | A read-only key from the Uptime Kuma dashboard. Empty disables the connector |
+| **Uptime Kuma: mappa alias** | no | empty | Maps what users say to monitor ids, one entry per line |
+
+**The connector is enabled only when the URL and the key are both filled in.**
+One function decides it, and every path goes through that function — so there is
+no state where the panel looks configured and the plugin quietly is not. With
+either field empty no network call is attempted at all.
+
+### Uptime Kuma: URL istanza
+
+Just the instance root, for example `https://kuma.example.org` or
+`http://uptime-kuma:3001`. The plugin appends `/metrics` itself.
+
+Validated strictly, so a mistake is refused while you are still looking at the
+form. A trailing slash is removed (joined with `/metrics` it would produce
+`//metrics`, which some reverse proxies answer with a 404), a sub-path is kept
+for an instance behind a reverse proxy, and query parameters, fragments and
+credentials embedded in the URL are all refused.
+
+**HTTP is accepted, and the log says so every time the configuration changes.**
+The key travels in a Basic Auth header as `base64(":" + key)`, which is an
+encoding and not encryption, so on plain HTTP anything that sees the traffic
+sees the key. That is negligible on a container network — where the URL is just
+the service name — and real across a campus LAN. HTTPS with certificate
+verification disabled is not offered: it exposes the key exactly as HTTP does
+while suggesting the channel is protected.
+
+### Uptime Kuma: API key
+
+Generate it in the Uptime Kuma dashboard, under **Settings → API Keys**, and
+paste it here. The plugin authenticates the way Uptime Kuma expects, which is
+not obvious: basic auth with an **empty username** and the key as the password.
+
+Only whitespace is stripped from what you paste — a trailing newline from a
+copy-paste would otherwise travel inside the header and turn every call into a
+401 that looks like a wrong key. Nothing else is validated, because Uptime Kuma
+documents neither the length nor the character set of its keys, so the instance
+answering 401 is the only honest test of whether a key is right.
+
+Three things worth knowing before you paste one:
+
+- **Make it read-only.** This plugin never writes to Uptime Kuma, and a key with
+  more rights than that buys nothing and risks more.
+- **It is stored in clear text**, in `settings.json` inside the plugin folder,
+  and the panel shows it as ordinary text. That file is in `.gitignore`, so it
+  stays out of the repository — but it is in every backup, container snapshot
+  and support copy of that folder. Rotate the key if the folder is ever copied.
+- **It never reaches a log line.** On the call path the plugin logs the type of
+  an exception and never its text, and never the request headers. A test asserts
+  it.
+
+### Uptime Kuma: mappa alias
+
+Optional. It exists because `/metrics` exposes no tags, so the only things
+linking what a user typed to a monitor are the monitor's **name** and its **id**.
+Name matching is automatic and costs no upkeep; this field covers what no
+heuristic can reach, a monitor called `srv-ugov-prod-01`.
+
+One entry per line, aliases on the left of the colon and monitor ids on the
+right, both comma-separated:
+
+```
+U-GOV, UGOV, Ugov: 12
+Esse3, Segreteria online: 14, 15, 16
+VPN: 17
+```
+
+Blank lines and lines starting with `#` are ignored. The id is the number in the
+monitor's URL in Uptime Kuma, `/dashboard/<id>`; to check one, open
+`<instance>/dashboard/<id>` and see whether the monitor that opens is the one
+you meant.
+
+**A malformed line is discarded on its own** — the field is never refused as a
+whole, because one stray character must not disable the resolution of every
+other service. The cost is that the panel reports nothing: the discarded line is
+named in the log, and that is where to look when an alias does not work.
+
+You usually need fewer entries than you would expect. Before matching, names and
+queries are lowercased, their internal whitespace collapsed, and `-`, `.` and
+`_` removed — which is why "UGOV" already finds `U-GOV - Autenticazione` without
+an alias.
+
+### What is deliberately not configurable
+
+| Absent | Why |
+| --- | --- |
+| Request timeout | Fixed at 2 seconds. The call sits inside a conversation with a user waiting, which is a property of the situation and not a preference |
+| Cache or refresh interval | There is none. The status is read at the moment the question arrives, because a forty-second-old status is indistinguishable from a current one |
+| A general on/off switch | An empty URL disables the connector, and Cheshire Cat already has one — deactivating the plugin. A second switch could disagree with the first |
 
 ## Requirements
 

@@ -1,23 +1,5 @@
 # Uptime Kuma Connector — Specifiche
 
-Versione `0.0.1`. **La configurazione è implementata, il comportamento no.** Il
-pannello espone i due campi di cui alla sezione 5, li valida, e l'adapter decide
-se il connettore è utilizzabile e segnala nel log i problemi di configurazione.
-Nessuna chiamata a Uptime Kuma viene ancora fatta, nessun tool è registrato, e
-nessuna domanda riceve risposta.
-
-Implementato: `settings.py` con i due validatori, `kuma_client.normalise_name()`
-e `kuma_client.parse_alias_map()`, `load_settings()`, `is_usable()`. Il resto è
-firma con corpo neutro.
-
-**Questo documento è autoportante.** Rende inutile
-`DEV/TODO/RIUSO-INTEGRAZIONE-KUMA.md`, la specifica dell'integrazione Kuma già
-in esercizio su Solution Map: ciò che di quel documento si applica qui è stato
-incorporato, e ciò che non si applica è registrato nella sezione 9 con la
-ragione. Una scelta scartata che non lascia traccia torna come proposta.
-
----
-
 ## 1. Obiettivo
 
 Dare al chatbot di help desk la capacità di rispondere a una domanda sola:
@@ -94,10 +76,23 @@ precedente, che leggeva `heartbeatList` dalla status page, vedeva i battiti con
 i loro orari; questo no. Ne segue che l'esito `known` della sezione 4 **non può**
 essere definito come «il monitor ha un battito recente», e non lo è.
 
-**Non ci sono i tag dei monitor.** Sarebbero il posto naturale per un alias
-gestito dentro Kuma. Non essendo esposti, i soli dati di correlazione
-disponibili sono **l'id e il nome** del monitor. È la premessa da cui parte
-tutta la sezione 3.2, e non è una scelta: è un vincolo.
+**~~Non ci sono i tag dei monitor.~~ Falso: i tag ci sono.** Verificato su
+un'istanza reale il 2026-09-08. Uptime Kuma espone ogni tag come **nome di
+etichetta con valore vuoto** — `CategoriaA=""` — e le etichette dei tag
+precedono `monitor_id` sulla riga. Sulle 49 righe osservate ognuna portava
+almeno un tag, otto ne portavano due, e il valore era sempre la stringa vuota.
+
+Questo apre la terza fonte di correlazione che questa sezione dichiarava
+inesistente: un alias gestito **dentro Kuma**, come tag, invece che nella
+configurazione del plugin. È l'opzione che non costa manutenzione al plugin e
+che chi amministra i monitor può cambiare da solo.
+
+Non è però una decisione già presa: usare i tag significa concordare una
+convenzione di naming con chi gestisce l'istanza, e i nomi dei tag passano dal
+vincolo delle etichette Prometheus, che non ammettono spazi né trattini — un tag
+scritto con quei caratteri arriva qui trasformato o non arriva affatto, e non è
+stato verificato quale delle due. La sezione 3.2 resta com'è, e la scelta è
+registrata come lavoro aperto nella sezione 8.
 
 **Non è detto che un monitor in pausa sia distinguibile.** Se Kuma smettesse di
 controllare un monitor, `/metrics` potrebbe continuare a riportarne l'ultimo
@@ -129,15 +124,37 @@ Kuma riceverebbe due chiamate identiche. Una finestra di pochi secondi
 risolverebbe, ma è un'ottimizzazione da fare su un problema misurato, non su uno
 previsto.
 
-### 2.3 La API key sta nell'ambiente, non nei settings
+### 2.3 La API key sta nel pannello, e solo lì
 
-`UPTIME_KUMA_API_KEY` da variabile d'ambiente. **Nessun campo nel pannello.**
+**Un campo nel pannello, `Uptime Kuma: API key`.** Nessuna variabile d'ambiente,
+nessun ripiego, nessuna precedenza da ricordare.
 
-Il core persiste i settings in `settings.json` sotto la cartella del plugin, in
-chiaro: finirebbe nei backup, nelle copie del container e negli snapshot di
-supporto. Per una chiave che dà accesso in lettura a tutto il monitoraggio, un
-campo nel pannello non è un ripiego accettabile — è il percorso sbagliato reso
-comodo.
+*Decisione rivista il 2026-09-08.* La versione precedente di questo documento
+prescriveva l'opposto — chiave solo da `UPTIME_KUMA_API_KEY`, nessun campo — e la
+motivazione di allora resta vera: il core persiste i settings in `settings.json`
+sotto la cartella del plugin, in chiaro. La decisione è cambiata lo stesso, e le
+due ragioni vanno dette per intero.
+
+La prima è che tutto ciò che serve per raggiungere Kuma si configura in un posto
+solo, da chi amministra l'istanza, senza toccare il deployment. La seconda è che
+la variabile d'ambiente, su questa installazione, **non aveva un posto dove
+essere impostata**: `compose.yml` non la passa al container e la riga
+`env_file: - .env` è commentata. Una configurazione che non si può configurare
+non è più sicura: è solo inutilizzabile, e spinge chi deve farla funzionare
+verso soluzioni peggiori.
+
+**Il costo resta, e non è mitigato da niente.** La chiave finisce in chiaro in
+`settings.json`, quindi in ogni backup, copia del container e snapshot di
+supporto di quella cartella, e il pannello la mostra come testo normale.
+`settings.json` è in `.gitignore`, il che la tiene fuori dal repository e da
+nessun altro posto. Ne seguono due obblighi operativi, non due consigli:
+
+- la chiave deve essere di **sola lettura** — il plugin non scrive mai su Kuma;
+- va **ruotata** se quella cartella viene copiata da qualche parte.
+
+Resta invece invariata la regola sui log: la chiave e l'header `Authorization`
+non compaiono mai in una riga di log, e sul percorso della chiamata si registra
+il tipo dell'eccezione, non il suo testo.
 
 La chiave si genera nella dashboard di Kuma, in *Settings → API Keys*.
 
@@ -233,15 +250,29 @@ serve a un amministratore, che lo ottiene dal log (sezione 3.4).
 
 ### 3.1 Cosa si legge da `/metrics`
 
-Le righe che interessano hanno questa forma:
+Le righe che interessano hanno questa forma. **Verificata su un'istanza reale
+il 2026-09-08**, ed è diversa da quella che questo documento riportava prima:
 
 ```
-monitor_status{monitor_id="12",monitor_name="VPN - GlobalProtect",monitor_type="http",...} 1
+monitor_status{CategoriaA="",monitor_id="1",monitor_name="VPN - GlobalProtect",monitor_type="http",monitor_url="https://…",monitor_hostname="null",monitor_port="null"} 1
 ```
 
-Il parsing: per ogni riga che comincia con `monitor_status{`, estrarre le
-etichette `chiave="valore"`, prendere `monitor_id` e `monitor_name`, e leggere il
-valore numerico finale. Una riga malformata, o priva di una delle due etichette,
+Tre differenze rispetto alla forma assunta, e la prima è quella che rompe il
+parsing:
+
+- **`monitor_id` non è la prima etichetta.** Le etichette dei tag vengono prima.
+  Un parser ancorato su `monitor_status{monitor_id=` non trova **nessuna** riga
+  su questa istanza.
+- **Ci sono tre etichette in più**: `monitor_url`, `monitor_hostname` e
+  `monitor_port`. Le ultime due valgono spesso la stringa `"null"`, che è testo
+  e non un valore nullo.
+- **I tag compaiono come nomi di etichetta con valore vuoto**, sezione 2.1.
+
+Il parsing, di conseguenza: per ogni riga che comincia con `monitor_status{`,
+estrarre **tutte** le coppie `chiave="valore"` senza fare ipotesi sul loro
+ordine, prendere `monitor_id` e `monitor_name`, e leggere il valore numerico
+finale. La fixture catturata è in `tests/unit/fixtures/metrics_sample.txt`, con
+nomi, URL e tag sostituiti e la forma intatta. Una riga malformata, o priva di una delle due etichette,
 **si scarta da sola**: non interrompe il parsing delle altre e non solleva.
 
 Kuma espone su `/metrics` anche altre metriche — `monitor_response_time`,
@@ -494,6 +525,7 @@ Nel pannello, sotto *Plugins → Uptime Kuma Connector → Settings*:
 | Campo | Default | Note |
 | --- | --- | --- |
 | URL dell'istanza Uptime Kuma | vuoto | Vuoto **disabilita** il connettore. Preferire HTTPS |
+| API key | vuoto | Chiave di **sola lettura**, da *Settings → API Keys*. Vuoto **disabilita** il connettore — sezione 2.3 |
 | Mappa degli alias, opzionale | vuoto | Casella **multiriga**, una voce per riga: `alias, alias: id, id` — sezione 3.2 |
 
 La mappa degli alias chiede al pannello una casella multiriga, perché il formato
@@ -502,16 +534,13 @@ altrimenti da modificare dentro un campo a riga singola che scorre di lato.
 
 Due test coprono le due metà.
 
-Nell'ambiente, mai nel pannello:
+Nessuna variabile d'ambiente, e nessun altro file da toccare: i tre campi sono
+tutta la configurazione del plugin.
 
-| Variabile | A cosa serve |
-| --- | --- |
-| `UPTIME_KUMA_API_KEY` | Autenticare le chiamate a `/metrics` |
-
-E nient'altro. Tre campi sono assenti di proposito, e ogni assenza è una
-decisione: **nessun campo per la API key** (2.3), **nessun campo per il timeout**
-— due secondi sono una proprietà dello stare dentro una conversazione, non una
-preferenza da regolare — e **nessun campo per la cache**, che non esiste (2.2).
+E nient'altro. Due campi sono assenti di proposito, e ogni assenza è una
+decisione: **nessun campo per il timeout** — due secondi sono una proprietà
+dello stare dentro una conversazione, non una preferenza da regolare — e
+**nessun campo per la cache**, che non esiste (2.2).
 
 **Un solo punto decide se il connettore è utilizzabile**, e tutti i percorsi
 passano da lì: una funzione che valuta URL configurato **e** chiave presente.
@@ -594,9 +623,20 @@ livelli e `--detailed` mostra il nome di ogni test.
 
 ## 8. Da verificare prima di implementare
 
-1. **Confermare la forma di `/metrics` su un'istanza reale**: il nome esatto
-   delle etichette, e se `monitor_status` emetta anche `2` e `3` oltre a `0` e
-   `1`. Da qui esce anche la fixture dei test.
+1. ~~**Confermare la forma di `/metrics` su un'istanza reale.**~~ **Fatto il
+   2026-09-08**, e il risultato è a metà. *Confermato:* l'endpoint risponde `200`
+   con basic auth a username vuoto, in 207 ms per 113 KB; `monitor_id` e
+   `monitor_name` sono entrambi sulla riga di stato; una riga per monitor, 49 in
+   tutto. *Smentito:* l'ordine delle etichette e l'assenza dei tag, sezioni 2.1 e
+   3.1. *Ancora aperto:* **quali valori di stato l'istanza emetta.** Al momento
+   della cattura tutti e 49 i monitor erano attivi, quindi si è osservato solo
+   `1`. Questo non dice nulla su `0`, `2` e `3`: la domanda resta, e va ricatturata
+   quando qualcosa è giù o in manutenzione. Non scrivere quelle righe a mano
+   nella fixture.
+2. **Decidere se usare i tag come terza fonte di correlazione**, ora che si sa
+   che esistono. Comporta concordare una convenzione con chi gestisce l'istanza,
+   e verificare come arrivano i tag con spazi o trattini, che non sono nomi di
+   etichetta Prometheus validi.
 2. **Un monitor in pausa o sospeso: compare in `/metrics`, e con quale valore?**
    Se comparisse con `0`, il plugin annuncerebbe come guasto un servizio
    semplicemente non più controllato, e servirebbe una regola in più — non un

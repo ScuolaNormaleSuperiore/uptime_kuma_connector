@@ -1,13 +1,21 @@
 """Plugin settings, exposed in the Cheshire Cat admin panel.
 
-Two fields, and the absences matter as much as the fields. See
+Three fields, and the absences matter as much as the fields. See
 `DOC/Specifiche.md`, section 5.
 
-- **There is no field for the API key, and there must not be one.** It comes
-  from `UPTIME_KUMA_API_KEY` in the environment. The core persists settings to
-  `settings.json` in clear text, and this key grants read access to the whole
-  monitoring system, so a panel field is not an acceptable fallback — it is the
-  wrong path made convenient. A test asserts that no such field exists.
+- **The API key is a panel field, and the panel is the only place it lives.**
+  Decided on 2026-09-08, reversing the earlier environment-only rule: everything
+  needed to reach Uptime Kuma is configured in one place, by whoever administers
+  the instance, without touching the deployment.
+
+  The cost is real and is not mitigated by anything in this file. The core
+  persists settings to `settings.json` in clear text under the plugin folder, so
+  the key reaches every backup, container snapshot and support copy that folder
+  appears in, and the panel renders it as ordinary text. `settings.json` is in
+  `.gitignore`, which keeps it out of the repository and nowhere else. Whoever
+  can read the plugin folder can read the key, and that key grants read access
+  to the whole monitoring system — so it must be a **read-only** key, and
+  rotating it is the only remedy once the folder has been copied.
 - **No timeout field.** Two seconds is a property of sitting inside a
   conversation in front of a waiting user, not a preference to tune.
 - **No cache field.** The status is read in real time; there is no state kept
@@ -22,10 +30,12 @@ in English. One short sentence per description: on this panel a long title plus
 a long description makes the settings page scroll horizontally, past roughly 200
 characters for the pair.
 
-The two validators are deliberately asymmetric, and the asymmetry is the point.
+The validators are deliberately asymmetric, and the asymmetry is the point.
 `base_url` is **strict**, so a typo is refused while the person who made it is
 still looking at the form. `alias_map` **never refuses**, so one bad line cannot
-disable the resolution of every other service.
+disable the resolution of every other service. `api_key` only strips, because
+Uptime Kuma promises nothing about the shape of a key and a wrong one is told
+apart from a right one by the instance answering 401, not by a pattern here.
 """
 
 from urllib.parse import urlsplit
@@ -76,6 +86,25 @@ class UptimeKumaConnectorSettings(BaseModel):
         description="Vuoto disabilita il connettore. Preferire HTTPS.",
     )
 
+    # Read-only key generated in Uptime Kuma, under Settings -> API Keys. It
+    # authenticates `/metrics` as basic auth with an **empty username** and the
+    # key as the password, `base64(":" + key)` — a convention of Uptime Kuma
+    # and not an obvious one.
+    #
+    # Empty disables the connector just as an empty URL does: both are read by
+    # `is_usable()` in the adapter, which is the single point that decides.
+    #
+    # No `json_schema_extra` marker asks the panel to mask it. None of the
+    # plugins on this instance uses one, so nothing establishes that the panel
+    # supports it, and a marker the panel does not know fails **silently** —
+    # see the note on `TEXT_AREA` above. A masked field that is not masked is
+    # worse than a field nobody believed was protected.
+    api_key: str = Field(
+        default="",
+        title="Uptime Kuma: API key",
+        description="Chiave di sola lettura, da Settings > API Keys di Uptime Kuma.",
+    )
+
     # A multi-line box, because the format is one entry per line and an
     # installation with a dozen services would otherwise be edited through a
     # single-line input scrolling sideways.
@@ -122,14 +151,14 @@ class UptimeKumaConnectorSettings(BaseModel):
         if not parts.hostname:
             raise ValueError("Manca l'indirizzo dell'istanza dopo lo schema")
 
-        # Credentials in the URL would be written to settings.json in clear
-        # text, which is the exact exposure the missing API key field exists to
-        # avoid. Refused rather than silently stripped, so the person who pasted
-        # them knows they did.
+        # Credentials in the URL are refused rather than silently stripped, so
+        # the person who pasted them knows they did. The key belongs in its own
+        # field, where the adapter reads it and where it is not also part of
+        # every log line that happens to carry the instance URL.
         if parts.username or parts.password:
             raise ValueError(
-                "L'URL non deve contenere credenziali: usare la variabile "
-                "d'ambiente UPTIME_KUMA_API_KEY"
+                "L'URL non deve contenere credenziali: usare il campo "
+                "API key"
             )
 
         if parts.query or parts.fragment:
@@ -141,6 +170,27 @@ class UptimeKumaConnectorSettings(BaseModel):
         # A path is kept: an instance behind a reverse proxy can legitimately
         # live under one, for example https://intranet.example.org/kuma
         return text
+
+    @field_validator("api_key")
+    @classmethod
+    def normalise_api_key(cls, value: str) -> str:
+        """Strip the key, and never refuse it.
+
+        Stripping is not cosmetic: a key pasted from a dashboard arrives with a
+        trailing newline often enough, and that byte would travel inside the
+        Basic Auth header and turn every call into a 401 that looks like a
+        wrong key rather than a stray character.
+
+        Nothing else is validated. Uptime Kuma documents neither the length nor
+        the character set of its keys as a contract, so any rule here would be
+        a guess that starts refusing valid keys the day the format changes. A
+        wrong key is caught by the instance answering 401, which is where it
+        can actually be told apart from a right one.
+
+        **Never raise, and never log the value.** An empty result is a working
+        state: it disables the connector.
+        """
+        return (value or "").strip()
 
     @field_validator("alias_map")
     @classmethod

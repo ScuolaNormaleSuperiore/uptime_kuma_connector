@@ -28,8 +28,6 @@ state kept between turns: the status is read when the question arrives. See
 Specifiche.md, sections 2.2 and 2.5.
 """
 
-import os
-
 from cat.log import log
 from cat.mad_hatter.decorators import plugin
 
@@ -40,24 +38,24 @@ except ImportError:  # pragma: no cover - depends on how the module is loaded
     import kuma_client
     from settings import SECURE_SCHEME, UptimeKumaConnectorSettings
 
-# Read from the environment and never from the admin panel: the core persists
-# settings to settings.json in clear text, and this key grants read access to
-# the whole monitoring system. See Specifiche.md, section 2.3.
-API_KEY_ENVIRONMENT_VARIABLE = "UPTIME_KUMA_API_KEY"
-
 # The call sits inside the turn, in front of a waiting user. A background job
 # would allow ten seconds; here that would be ten seconds of silence in a
 # conversation. See Specifiche.md, section 2.5.
 REQUEST_TIMEOUT_SECONDS = 2.0
 
 
-def resolve_api_key() -> str:
-    """The API key, from the environment only.
+def resolve_api_key(settings: UptimeKumaConnectorSettings) -> str:
+    """The API key, from the admin panel and from nowhere else.
 
-    Not implemented beyond the read itself, which has no logic to get wrong.
-    There is deliberately no settings field to fall back to.
+    One source, deliberately. A field plus an environment fallback would be two
+    places that can disagree, and the question "which one is this instance
+    actually using?" has no answer visible in the panel — the failure this
+    plugin already refuses to build in `is_usable()`.
+
+    The value is stripped by the settings validator, so this is a read with no
+    logic to get wrong. **Its result must never reach a log line.**
     """
-    return os.environ.get(API_KEY_ENVIRONMENT_VARIABLE, "").strip()
+    return settings.api_key
 
 
 def load_settings(cat) -> UptimeKumaConnectorSettings:
@@ -111,7 +109,7 @@ def is_usable(settings: UptimeKumaConnectorSettings) -> bool:
     tested only the identifier and showed a monitoring indicator with the
     integration switched off. See Specifiche.md, section 5.
     """
-    return bool(settings.base_url) and bool(resolve_api_key())
+    return bool(settings.base_url) and bool(resolve_api_key(settings))
 
 
 def alias_map(settings: UptimeKumaConnectorSettings) -> dict:
@@ -145,7 +143,10 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
     """
     global _reported_configuration
 
-    signature = (settings.base_url, settings.alias_map)
+    # `bool(...)` and not the key itself: this module-level variable outlives
+    # the turn, and a credential kept in it is a credential in every memory dump
+    # and every debugger session for as long as the plugin stays loaded.
+    signature = (settings.base_url, bool(settings.api_key), settings.alias_map)
     if signature == _reported_configuration:
         return
     _reported_configuration = signature
@@ -162,6 +163,15 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
             "[uptime-kuma] the instance URL is not HTTPS: the API key will "
             "travel in clear text on every call. Acceptable only if that "
             "traffic never leaves a private network."
+        )
+
+    if settings.base_url and not settings.api_key:
+        # Half-configured is the state worth naming: somebody filled the URL and
+        # stopped. Without this line the plugin is silently disabled and looks
+        # configured in the panel.
+        log.warning(
+            "[uptime-kuma] the instance URL is set but the API key field is "
+            "empty: the connector stays disabled and no call is made."
         )
 
     _aliases, problems = kuma_client.parse_alias_map(settings.alias_map)

@@ -1,0 +1,40 @@
+# Captured from a real Uptime Kuma instance on 2026-09-08 with
+#   curl -u ":$KEY" <instance>/metrics
+#
+# Every monitor name, URL and hostname is replaced, and every tag renamed:
+# they are internal topology and must not reach a tracked file. The *shape* is
+# untouched, and the shape is the whole point of this file.
+#
+# Three facts recorded here that the specification had wrong, see
+# DOC/Specifiche.md sections 2.1 and 3.1:
+#
+#   1. tag labels come FIRST, before monitor_id. A parser anchored on
+#      `monitor_status{monitor_id=` matches nothing on this instance.
+#   2. tags ARE exposed, as label names with an empty value.
+#   3. there are three more labels than documented: monitor_url,
+#      monitor_hostname and monitor_port, the last two often the string "null".
+#
+# All 49 monitors were up when this was captured, so **only the value 1 appears
+# here**. Whether this instance ever emits 0, 2 or 3 is still unobserved: do not
+# hand-write those lines into this file, capture them.
+
+# HELP monitor_cert_days_remaining The number of days remaining until the certificate expires
+# TYPE monitor_cert_days_remaining gauge
+# HELP monitor_cert_is_valid Is the certificate still valid? (1 = Yes, 0= No)
+# TYPE monitor_cert_is_valid gauge
+monitor_status{CategoriaA="",monitor_id="1",monitor_name="VPN - GlobalProtect",monitor_type="http",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_status{CategoriaD="",CategoriaE="",monitor_id="16",monitor_name="U-GOV - Autenticazione Cineca",monitor_type="http",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_status{CategoriaD="",CategoriaE="",monitor_id="28",monitor_name="Esse3 - Web",monitor_type="http",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_status{CategoriaF="",CategoriaE="",monitor_id="46",monitor_name="Esse3 - DB",monitor_type="mysql",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_status{CategoriaG="",CategoriaE="",monitor_id="47",monitor_name="Portale di Ateneo",monitor_type="dns",monitor_url="https://servizio.example.org",monitor_hostname="servizio.example.org",monitor_port="53"} 1
+monitor_status{CategoriaG="",CategoriaE="",monitor_id="48",monitor_name="Posta elettronica",monitor_type="port",monitor_url="https://servizio.example.org",monitor_hostname="servizio.example.org",monitor_port="636"} 1
+monitor_status{CategoriaF="",CategoriaE="",monitor_id="49",monitor_name="DNS interno",monitor_type="postgres",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_status{CategoriaF="",CategoriaC="",monitor_id="50",monitor_name="Archivio documentale",monitor_type="oracledb",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_response_time{CategoriaA="",monitor_id="1",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 1852
+monitor_response_time{CategoriaA="",monitor_id="2",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 1003
+monitor_cert_days_remaining{CategoriaA="",monitor_id="1",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 58
+monitor_cert_days_remaining{CategoriaA="",monitor_id="2",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 58
+monitor_uptime_ratio{CategoriaA="",monitor_id="1",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null",window="1d"} 1
+monitor_uptime_ratio{CategoriaA="",monitor_id="1",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null",window="30d"} 0.9997635933806147
+process_cpu_seconds_total 3238.0474619999995
+nodejs_version_info{version="v22.22.3",major="22",minor="22",patch="3"} 1

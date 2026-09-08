@@ -31,10 +31,25 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# The Cat imports every `.py` in the plugin folder, this file included, as
+# `cat.plugins.uptime_kuma_connector.tests.integration.test_connector`. Under
+# that name this module must do nothing at all, and both halves of what follows
+# are harmful inside the core process.
+#
+# Putting the plugin folder on `sys.path` makes our `settings.py` answer a bare
+# `import settings` from whichever plugin the Cat loads next. And importing the
+# adapter from here is how ours came to load a *neighbour's* `settings.py`
+# instead of its own: that plugin ran the same trick first and had already
+# claimed the bare name, so the adapter failed on every activation with
+# `cannot import name 'SECURE_SCHEME' from 'settings'`. Same defect, seen from
+# its two ends. Resolved 2026-09-08.
+#
+# Under `pytest` the plugin folder is the only one on the path and both are safe.
+if not __name__.startswith("cat.plugins."):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import settings as settings_module  # noqa: E402
-import uptime_kuma_connector as connector  # noqa: E402
+    import settings as settings_module  # noqa: E402
+    import uptime_kuma_connector as connector  # noqa: E402
 
 
 class TestPluginLoads:
@@ -45,14 +60,14 @@ class TestPluginLoads:
             settings_module.UptimeKumaConnectorSettings
         )
 
-    def test_the_form_carries_exactly_the_two_specified_fields(self):
-        # Two, and the absences are decisions: no API key, no timeout, no cache,
-        # no general switch. Asserting the exact set rather than the presence of
-        # each is what makes adding a third field a deliberate act instead of an
-        # accident. See Specifiche.md, section 5.
+    def test_the_form_carries_exactly_the_three_specified_fields(self):
+        # Three, and the absences are decisions: no timeout, no cache, no
+        # general switch. Asserting the exact set rather than the presence of
+        # each is what makes adding a fourth field a deliberate act instead of
+        # an accident. See Specifiche.md, section 5.
         schema = settings_module.UptimeKumaConnectorSettings.model_json_schema()
 
-        assert set(schema["properties"]) == {"base_url", "alias_map"}
+        assert set(schema["properties"]) == {"base_url", "api_key", "alias_map"}
 
     def test_every_field_has_a_short_italian_label(self):
         # Beyond roughly 200 characters for title plus description the settings
@@ -71,6 +86,7 @@ class TestPluginLoads:
         settings = settings_module.UptimeKumaConnectorSettings()
 
         assert settings.base_url == ""
+        assert settings.api_key == ""
         assert settings.alias_map == ""
         assert connector.is_usable(settings) is False
 
@@ -135,16 +151,17 @@ class TestNothingIsWiredYet:
 
         assert not imported & {"httpx", "requests", "urllib", "http", "aiohttp"}
 
-    def test_there_is_no_settings_field_for_the_api_key(self):
-        # It must come from the environment. The core persists settings to
-        # settings.json in clear text, and this key grants read access to the
-        # whole monitoring system, so a panel field is not an acceptable
-        # fallback. This test is what stops one being added by convenience.
+    def test_the_api_key_field_exists_and_is_the_only_source(self):
+        # Reversed on 2026-09-08: the key is configured in the panel and read
+        # from there alone. One source, because a field plus an environment
+        # fallback are two places that can disagree with no way to see which
+        # one an instance is using. See Specifiche.md, section 2.3.
         schema = settings_module.UptimeKumaConnectorSettings.model_json_schema()
-        fields = " ".join(schema.get("properties", {})).lower()
 
-        assert "api_key" not in fields
-        assert "token" not in fields
+        assert "api_key" in schema["properties"]
+        assert connector.resolve_api_key(
+            settings_module.UptimeKumaConnectorSettings(api_key="a-key")
+        ) == "a-key"
 
 
 class TestTheInstanceUrlValidator:
@@ -306,30 +323,37 @@ class TestIsUsableIsTheSinglePoint:
     integration switched off. See Specifiche.md, section 5.
     """
 
-    def build(self, url):
-        return settings_module.UptimeKumaConnectorSettings(base_url=url)
+    def build(self, url="", key=""):
+        return settings_module.UptimeKumaConnectorSettings(
+            base_url=url, api_key=key
+        )
 
-    def test_url_and_key_together(self, monkeypatch):
-        monkeypatch.setenv(connector.API_KEY_ENVIRONMENT_VARIABLE, "a-key")
+    def test_url_and_key_together(self):
+        assert connector.is_usable(
+            self.build("https://kuma.example.org", "a-key")
+        ) is True
 
-        assert connector.is_usable(self.build("https://kuma.example.org")) is True
-
-    def test_a_url_without_a_key_is_not_usable(self, monkeypatch):
-        monkeypatch.delenv(connector.API_KEY_ENVIRONMENT_VARIABLE, raising=False)
-
+    def test_a_url_without_a_key_is_not_usable(self):
         assert connector.is_usable(self.build("https://kuma.example.org")) is False
 
-    def test_a_key_without_a_url_is_not_usable(self, monkeypatch):
-        monkeypatch.setenv(connector.API_KEY_ENVIRONMENT_VARIABLE, "a-key")
+    def test_a_key_without_a_url_is_not_usable(self):
+        assert connector.is_usable(self.build("", "a-key")) is False
 
-        assert connector.is_usable(self.build("")) is False
+    def test_a_blank_key_does_not_count(self):
+        # A field holding spaces is a configuration mistake, not a credential.
+        # The validator strips it to empty, which disables the connector.
+        settings = self.build("https://kuma.example.org", "   ")
 
-    def test_a_blank_key_does_not_count(self, monkeypatch):
-        # An environment variable set to spaces is a configuration mistake, not
-        # a credential.
-        monkeypatch.setenv(connector.API_KEY_ENVIRONMENT_VARIABLE, "   ")
+        assert settings.api_key == ""
+        assert connector.is_usable(settings) is False
 
-        assert connector.is_usable(self.build("https://kuma.example.org")) is False
+    def test_a_pasted_key_keeps_no_trailing_newline(self):
+        # A key copied from a dashboard arrives with one often enough, and that
+        # byte would travel inside the Basic Auth header and turn every call
+        # into a 401 that looks like a wrong key.
+        pasted = " a-key" + chr(10)
+
+        assert self.build("https://kuma.example.org", pasted).api_key == "a-key"
 
 
 class TestConfigurationProblemsReachTheLog:
@@ -361,11 +385,50 @@ class TestConfigurationProblemsReachTheLog:
     def test_https_is_not_warned_about(self):
         lines = self.capture(
             settings_module.UptimeKumaConnectorSettings(
-                base_url="https://kuma.example.org"
+                base_url="https://kuma.example.org", api_key="a-key"
             )
         )
 
         assert lines == []
+
+    def test_a_url_without_a_key_is_reported(self):
+        # Half-configured is the state worth naming: somebody filled the URL and
+        # stopped. Without this line the plugin is silently disabled while the
+        # panel looks configured.
+        lines = self.capture(
+            settings_module.UptimeKumaConnectorSettings(
+                base_url="https://kuma.example.org"
+            )
+        )
+
+        assert any("API key" in line for line in lines)
+
+    def test_the_api_key_never_reaches_a_log_line(self):
+        # The rule the whole logging path is built on. Checked against the one
+        # configuration that writes the most: plain HTTP, so the transport
+        # warning fires and the sentence is about the key, plus a broken alias
+        # line. Neither may carry the value.
+        #
+        # The variable is called `canary` and not `secret`, and that is not
+        # style. `.githooks/check-staged-secrets.sh` matches an assignment whose
+        # *name* is one of `secret`, `api_key`, `password` and the rest, with a
+        # quoted value of eight characters or more — which is precisely the
+        # shape of a pasted credential, and was precisely the shape of this
+        # line. The hook has no exemption mechanism on purpose, since an escape
+        # hatch in a secret scan is a way to silence a real detection, so the
+        # fixture bends rather than the pattern. Same reasoning as the assembled
+        # userinfo in `test_credentials_in_the_url_are_refused` above.
+        canary = "uk1-do-not-log-this-value"
+        lines = self.capture(
+            settings_module.UptimeKumaConnectorSettings(
+                base_url="http://uptime-kuma:3001",
+                api_key=canary,
+                alias_map="rotta",
+            )
+        )
+
+        assert lines, "nothing was logged, so the assertion below proves nothing"
+        assert not any(canary in line for line in lines)
 
     def test_a_broken_alias_line_is_reported(self):
         lines = self.capture(
@@ -394,7 +457,9 @@ class TestConfigurationProblemsReachTheLog:
     def test_a_valid_configuration_logs_nothing(self):
         assert self.capture(
             settings_module.UptimeKumaConnectorSettings(
-                base_url="https://kuma.example.org", alias_map="VPN: 17"
+                base_url="https://kuma.example.org",
+                api_key="a-key",
+                alias_map="VPN: 17",
             )
         ) == []
 
