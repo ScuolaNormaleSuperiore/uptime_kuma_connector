@@ -1,9 +1,9 @@
 """Pure logic for reading Uptime Kuma. Imports nothing from `cat`, does no I/O.
 
-**Nothing here is implemented.** Every function is a signature with a neutral
-body, kept so the shape of the module matches the specification and so the next
-person starts from a map rather than a blank file. The specification is
-`DOC/Specifiche.md`; the section numbers below point into it.
+This module is being implemented incrementally. Functions not reached yet keep
+a neutral body, so the shape of the module matches the specification without
+exposing unfinished behaviour. The specification is `DOC/Specifiche.md`; the
+section numbers below point into it.
 
 Two rules govern this module and are the reason it exists separately:
 
@@ -20,6 +20,9 @@ call them are **not registered** in the adapter either.
 
 from __future__ import annotations
 
+import base64
+import re
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 # Uptime Kuma's own status codes, as they appear in the `monitor_status` metric.
@@ -44,10 +47,35 @@ OUTCOME_UNKNOWN = "unknown"
 # the outcome is `ambiguous` rather than a sentence carrying dozens of names
 # into the prompt. A project value, to revisit against a real instance.
 MAXIMUM_REPORTED_MATCHES = 5
+MAXIMUM_SERVICE_NAME_LENGTH = 80
 
 # Removed before comparing names, so "UGOV" finds "U-GOV - Autenticazione" on
 # its own and a whole class of aliases never has to be written by hand.
 _INSIGNIFICANT_CHARACTERS = str.maketrans("", "", "-._")
+
+# Prometheus label names are identifiers and label values may escape a quote,
+# backslash, or newline. Parsing labels separately avoids coupling the monitor
+# fields to an order that Uptime Kuma does not promise.
+_LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:\\.|[^"\\])*)"')
+_MONITOR_STATUS_LINE = re.compile(
+    r"^monitor_status\{(.*)\}\s+(\S+)(?:\s+\S+)?\s*$"
+)
+
+
+@dataclass(frozen=True)
+class MonitorResolution:
+    """The result of resolving a requested service against monitor names.
+
+    `missing_alias_ids` is kept separate from an ordinary empty match: an alias
+    with an invalid id is a configuration failure, not proof that the requested
+    service is unmonitored. The adapter will log partial misses; `describe_status`
+    will turn a total alias miss into `unknown`.
+    """
+
+    requested_name: str
+    matches: tuple[tuple[int, str], ...]
+    used_alias: bool
+    missing_alias_ids: tuple[int, ...]
 
 
 def normalise_name(value: str) -> str:
@@ -157,62 +185,185 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
 def metrics_url(base_url: str) -> str:
     """The single endpoint this plugin reads.
 
-    Not implemented. See Specifiche.md, section 2.1: `/metrics` is preferred
-    over the status-page endpoints because one line carries name, id and status
-    together, and because the alternative requires a *published* status page.
+    See Specifiche.md, section 2.1: `/metrics` is preferred over the status-page
+    endpoints because one line carries name, id and status together, and
+    because the alternative requires a *published* status page.
+
+    The settings validator owns URL normalisation and removes a trailing slash;
+    this function only appends the endpoint. An empty URL stays empty so a
+    caller cannot accidentally turn an unusable configuration into `/metrics`.
     """
-    return ""
+    if not base_url:
+        return ""
+    return f"{base_url}/metrics"
 
 
 def basic_auth_header(api_key: str) -> str:
     """The Authorization header value for `/metrics`.
 
-    Not implemented. The form is a convention of Uptime Kuma and is not
-    obvious: basic auth with an **empty username** and the API key as the
-    password, `base64(":" + api_key)`. See Specifiche.md, section 2.3.
+    The form is a convention of Uptime Kuma and is not obvious: basic auth with
+    an **empty username** and the API key as the password,
+    `base64(":" + api_key)`. See Specifiche.md, section 2.3.
+
+    An empty key returns an empty value so the adapter can recognise an
+    unusable configuration without constructing an authentication header.
     """
-    return ""
+    if not api_key:
+        return ""
+
+    credentials = f":{api_key}".encode("utf-8")
+    encoded_credentials = base64.b64encode(credentials).decode("ascii")
+    return f"Basic {encoded_credentials}"
+
+
+def _parse_prometheus_labels(text: str) -> dict[str, str] | None:
+    """Parse one `{key="value",...}` body, rejecting malformed input."""
+    labels: dict[str, str] = {}
+    position = 0
+
+    while position < len(text):
+        match = _LABEL.match(text, position)
+        if match is None:
+            return None
+
+        key, raw_value = match.groups()
+        value: list[str] = []
+        escaped = False
+        for character in raw_value:
+            if escaped:
+                value.append("\n" if character == "n" else character)
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            else:
+                value.append(character)
+        if escaped:
+            return None
+
+        labels[key] = "".join(value)
+        position = match.end()
+        if position == len(text):
+            break
+        if text[position] != ",":
+            return None
+        position += 1
+
+    return labels
 
 
 def parse_monitor_metrics(payload: str) -> tuple[dict[int, str], dict[int, int]]:
     """Read `monitor_status` lines into names and statuses, both keyed by id.
 
-    Not implemented. Returns `(names, statuses)`.
+    Returns `(names, statuses)`. The labels are parsed without assuming either
+    their order or their complete set: tags and transport-specific fields are
+    expected to vary between monitors.
 
     The lines look like:
 
-        monitor_status{monitor_id="12",monitor_name="VPN",monitor_type="http"} 1
+        monitor_status{tag="",monitor_id="12",monitor_name="VPN",monitor_type="http"} 1
 
     A malformed line or a missing label is skipped, never raised on. The label
     format is the part most easily assumed wrong, which is why the fixtures for
     this function must come from a real response. See Specifiche.md, 3.1 and 6.
     """
-    return {}, {}
+    names: dict[int, str] = {}
+    statuses: dict[int, int] = {}
+
+    for raw_line in str(payload or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("monitor_status{"):
+            continue
+
+        match = _MONITOR_STATUS_LINE.fullmatch(line)
+        if match is None:
+            continue
+
+        labels = _parse_prometheus_labels(match.group(1))
+        if labels is None:
+            continue
+
+        try:
+            monitor_id = int(labels["monitor_id"])
+            monitor_name = labels["monitor_name"]
+            status = int(match.group(2))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        names[monitor_id] = monitor_name
+        statuses[monitor_id] = status
+
+    return names, statuses
 
 
 def find_monitor(
     names: Mapping[int, str],
     wanted: str,
-    explicit_ids: Mapping[str, int] | None = None,
-) -> tuple[int, str] | None:
-    """Resolve what the user typed to exactly one monitor.
+    explicit_ids: Mapping[str, tuple[int, ...]] | None = None,
+) -> MonitorResolution:
+    """Resolve what the user typed to every matching monitor.
 
-    Not implemented. Returns `(id, name)` or `None`.
-
-    Order, per Specifiche.md 3.2: an explicitly configured id wins; then a
-    case-insensitive exact name match; then a containment match. **An ambiguous
-    query returns `None`**, deliberately — naming one of several monitors would
-    present a guess to the user as a fact.
+    The request is limited to 80 characters before it is retained for a
+    response sentence. Resolution order is an explicit alias, an exact name,
+    then containment in either direction, including the same normalised words
+    in a different order. Every match is returned: the caller reports up to
+    five and produces the `ambiguous` outcome above that limit.
     """
-    return None
+    requested_name = _truncate_service_name(wanted)
+    normalised_wanted = normalise_name(requested_name)
+    empty = MonitorResolution(requested_name, (), False, ())
+    if not normalised_wanted:
+        return empty
+
+    aliases = explicit_ids or {}
+    alias_ids = aliases.get(normalised_wanted)
+    if alias_ids is not None:
+        matches = tuple(
+            (monitor_id, names[monitor_id])
+            for monitor_id in alias_ids
+            if monitor_id in names
+        )
+        missing_ids = tuple(
+            monitor_id for monitor_id in alias_ids if monitor_id not in names
+        )
+        return MonitorResolution(requested_name, matches, True, missing_ids)
+
+    exact_matches = tuple(
+        (monitor_id, name)
+        for monitor_id, name in names.items()
+        if normalise_name(name) == normalised_wanted
+    )
+    if exact_matches:
+        return MonitorResolution(requested_name, exact_matches, False, ())
+
+    containment_matches = tuple(
+        (monitor_id, name)
+        for monitor_id, name in names.items()
+        if _names_contain_each_other(normalised_wanted, normalise_name(name))
+    )
+    return MonitorResolution(requested_name, containment_matches, False, ())
+
+
+def _names_contain_each_other(left: str, right: str) -> bool:
+    """Match normalised names by phrase containment or by their word sets."""
+    if left in right or right in left:
+        return True
+    return set(left.split()).issubset(right.split()) or set(right.split()).issubset(
+        left.split()
+    )
+
+
+def _truncate_service_name(value: str) -> str:
+    """Bound text that may later be included in a sentence for the model."""
+    return str(value or "")[:MAXIMUM_SERVICE_NAME_LENGTH]
 
 
 def monitored_service_names(names: Mapping[int, str]) -> Sequence[str]:
-    """Every monitor name, so a miss can say what *is* monitored.
+    """Every monitor name, for diagnosing a miss in the adapter log.
 
-    Not implemented. This is not a convenience: without it a configuration
-    mistake is silent, because a wrong name produces the same answer as a
-    service that genuinely is not monitored. See Specifiche.md, section 3.3.
+    Not implemented. These names never enter the `not_monitored` sentence:
+    offering the model other services could make it answer about the wrong
+    one. The adapter may instead log at most three close names for an
+    administrator. See Specifiche.md, section 3.4.
     """
     return ()
 
@@ -220,26 +371,77 @@ def monitored_service_names(names: Mapping[int, str]) -> Sequence[str]:
 def describe_status(
     payload: str,
     service_name: str,
-    explicit_ids: Mapping[str, int] | None = None,
+    explicit_ids: Mapping[str, tuple[int, ...]] | None = None,
 ) -> tuple[str, str]:
     """Turn a `/metrics` response into one sentence for the model.
 
-    Not implemented. Returns `(outcome, sentence)`, where the outcome is one of
-    the three constants above and the sentence is what reaches the model.
-
-    The sentence is product text, not debug output: it is in Italian, it names
-    the monitor as Uptime Kuma names it, and it never carries a URL, a key or an
-    internal identifier. See Specifiche.md, section 4.
+    Returns `(outcome, sentence)`, where the outcome is one of the four
+    constants above and the sentence is what reaches the model. An unparseable
+    payload, a broken alias, or an unrecognised status is `unknown`: none may
+    be misreported as a working service. See Specifiche.md, section 4.
     """
-    return OUTCOME_UNKNOWN, ""
+    requested_name = _truncate_service_name(service_name)
+    names, statuses = parse_monitor_metrics(payload)
+    if not names:
+        return OUTCOME_UNKNOWN, unreachable_sentence(requested_name)
+
+    resolution = find_monitor(names, requested_name, explicit_ids)
+    if resolution.used_alias and not resolution.matches:
+        return OUTCOME_UNKNOWN, unreachable_sentence(resolution.requested_name)
+
+    if not resolution.matches:
+        return (
+            OUTCOME_NOT_MONITORED,
+            "Non risulta alcun controllo di disponibilità per "
+            f"{resolution.requested_name}. Non è disponibile alcuna informazione "
+            "sul suo stato: non concluderne che il servizio funzioni.",
+        )
+
+    if len(resolution.matches) > MAXIMUM_REPORTED_MATCHES:
+        return (
+            OUTCOME_AMBIGUOUS,
+            f"{resolution.requested_name} corrisponde a troppi controlli per "
+            "identificare un servizio. Chiedi all'utente quale servizio intende.",
+        )
+
+    clauses: list[tuple[str, str]] = []
+    for monitor_id, monitor_name in resolution.matches:
+        clause = _status_clause(statuses.get(monitor_id))
+        if clause is None:
+            return OUTCOME_UNKNOWN, unreachable_sentence(resolution.requested_name)
+        clauses.append((monitor_name, clause))
+
+    if len(clauses) == 1:
+        monitor_name, clause = clauses[0]
+        return OUTCOME_KNOWN, f"Il servizio {monitor_name} {clause}."
+
+    reported = "; ".join(f"{name} {clause}" for name, clause in clauses)
+    return (
+        OUTCOME_KNOWN,
+        f"Per {resolution.requested_name} risultano più controlli: {reported}.",
+    )
 
 
-def unreachable_sentence() -> str:
+def _status_clause(status: int | None) -> str | None:
+    """Map a known Uptime Kuma status to its Italian sentence clause."""
+    return {
+        STATUS_UP: "risulta attivo",
+        STATUS_DOWN: "non risulta attualmente attivo",
+        STATUS_PENDING: "presenta rilevazioni intermittenti",
+        STATUS_MAINTENANCE: "è in manutenzione programmata",
+    }.get(status)
+
+
+def unreachable_sentence(service_name: str) -> str:
     """What to tell the model when `/metrics` could not be read at all.
 
-    Not implemented. It must state that the status is not verifiable **and**
-    instruct the model not to conclude anything: asked "is the VPN down?", a
-    model fills a silence if it is allowed to. This is the invariant of the
-    whole plugin — never invent a state. See Specifiche.md, section 4.
+    It states that the status is not verifiable **and** instructs the model not
+    to conclude anything: asked "is the VPN down?", a model fills a silence if
+    it is allowed to. This is the invariant of the whole plugin — never invent
+    a state. See Specifiche.md, section 4.
     """
-    return ""
+    return (
+        f"Non è stato possibile determinare lo stato di {_truncate_service_name(service_name)}. "
+        "Non trarre conclusioni: non affermare né che il servizio è attivo né "
+        "che è guasto."
+    )

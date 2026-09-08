@@ -328,8 +328,9 @@ prompt: non deve essere una stringa di lunghezza arbitraria.
 2. **Corrispondenza esatta sul nome.** Un monitor chiamato esattamente come
    richiesto non viene mai oscurato da uno più lungo che lo contiene.
 3. **Corrispondenza per contenimento**, nei due sensi: la richiesta contenuta nel
-   nome, o il nome contenuto nella richiesta. Il secondo senso serve perché il
-   modello può passare «autenticazione U-GOV» invece di «U-GOV».
+   nome, il nome contenuto nella richiesta, oppure le stesse parole normalizzate
+   in ordine diverso. L'ultimo caso serve perché il modello può passare
+   «autenticazione U-GOV» invece di «U-GOV».
 4. **Nessuna corrispondenza** → esito `not_monitored`, sezione 3.4.
 
 #### La mappa degli alias
@@ -584,7 +585,8 @@ livelli e `--detailed` mostra il nome di ogni test.
 - risposta senza alcuna riga `monitor_status`
 - corrispondenza esatta che non viene oscurata da una più lunga
 - normalizzazione: «UGOV» trova `U-GOV - Autenticazione`
-- contenimento nei due sensi: «autenticazione U-GOV» trova lo stesso monitor
+- contenimento nei due sensi e con parole invertite: «autenticazione U-GOV»
+  trova lo stesso monitor
 - **l'alias vince sul matching per nome** anche quando il nome avrebbe trovato
   altro
 - **un alias verso un id inesistente dà `unknown`, non `not_monitored`**

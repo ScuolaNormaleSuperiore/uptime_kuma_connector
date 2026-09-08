@@ -202,3 +202,288 @@ class TestParseAliasMap:
         # The shipped default. It must not produce a single log line.
         assert kuma_client.parse_alias_map("") == ({}, ())
         assert kuma_client.parse_alias_map(None) == ({}, ())
+
+
+class TestMetricsUrl:
+    """Building the single endpoint read by the plugin."""
+
+    def test_plain_instance_url(self):
+        assert (
+            kuma_client.metrics_url("https://kuma.example.org")
+            == "https://kuma.example.org/metrics"
+        )
+
+    def test_instance_behind_a_reverse_proxy_subpath(self):
+        assert (
+            kuma_client.metrics_url("https://intranet.example.org/kuma")
+            == "https://intranet.example.org/kuma/metrics"
+        )
+
+    def test_empty_instance_url_stays_empty(self):
+        assert kuma_client.metrics_url("") == ""
+
+
+class TestBasicAuthHeader:
+    """Uptime Kuma uses an empty Basic Auth username and the key as password."""
+
+    def test_known_key_has_the_expected_header(self):
+        # Hand-computed base64 for the UTF-8 bytes of ":secret".
+        assert kuma_client.basic_auth_header("secret") == "Basic OnNlY3JldA=="
+
+    def test_empty_key_is_recognisably_unusable(self):
+        assert kuma_client.basic_auth_header("") == ""
+
+
+class TestParseMonitorMetrics:
+    """Only the relevant, real-world Prometheus metric family is read."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "metrics_sample.txt"
+
+    def test_captured_metrics_provide_all_eight_monitors(self):
+        payload = self.FIXTURE.read_text(encoding="utf-8")
+
+        names, statuses = kuma_client.parse_monitor_metrics(payload)
+
+        assert names == {
+            1: "VPN - GlobalProtect",
+            16: "U-GOV - Autenticazione Cineca",
+            28: "Esse3 - Web",
+            46: "Esse3 - DB",
+            47: "Portale di Ateneo",
+            48: "Posta elettronica",
+            49: "DNS interno",
+            50: "Archivio documentale",
+        }
+        assert statuses == {monitor_id: 1 for monitor_id in names}
+
+    def test_noise_metric_families_are_ignored(self):
+        payload = (
+            'monitor_response_time{monitor_id="1",monitor_name="VPN"} 12\n'
+            "process_cpu_seconds_total 32.4\n"
+            'nodejs_version_info{version="v22"} 1\n'
+        )
+
+        assert kuma_client.parse_monitor_metrics(payload) == ({}, {})
+
+    def test_malformed_lines_do_not_discard_a_valid_one(self):
+        payload = "\n".join(
+            (
+                'monitor_status{tag="",monitor_id="4",monitor_name="Valid"} 3',
+                'monitor_status{monitor_id="5",monitor_name="Truncated" 1',
+                "monitor_status 1",
+                'monitor_status{monitor_id="6",broken,monitor_name="Broken"} 0',
+                'monitor_status{monitor_id="7"} 1',
+            )
+        )
+
+        assert kuma_client.parse_monitor_metrics(payload) == (
+            {4: "Valid"},
+            {4: kuma_client.STATUS_MAINTENANCE},
+        )
+
+    def test_no_monitor_status_line_returns_empty_mappings(self):
+        assert kuma_client.parse_monitor_metrics("# no monitor status\n") == ({}, {})
+
+
+class TestFindMonitor:
+    """Service resolution keeps explicit administrator choices ahead of guesses."""
+
+    NAMES = {
+        12: "U-GOV",
+        13: "U-GOV - Autenticazione Cineca",
+        14: "Esse3 - Web",
+        15: "Esse3 - DB",
+        17: "VPN - GlobalProtect",
+    }
+
+    def test_exact_name_is_not_shadowed_by_a_longer_name(self):
+        resolution = kuma_client.find_monitor(self.NAMES, "u_gov")
+
+        assert resolution.matches == ((12, "U-GOV"),)
+        assert not resolution.used_alias
+
+    def test_normalisation_and_containment_find_a_monitor(self):
+        resolution = kuma_client.find_monitor(
+            {13: "U-GOV - Autenticazione Cineca"}, "autenticazione UGOV"
+        )
+
+        assert resolution.matches == ((13, "U-GOV - Autenticazione Cineca"),)
+
+    def test_an_explicit_alias_wins_over_name_matching(self):
+        resolution = kuma_client.find_monitor(
+            self.NAMES,
+            "VPN",
+            {"vpn": (14,)},
+        )
+
+        assert resolution.matches == ((14, "Esse3 - Web"),)
+        assert resolution.used_alias
+
+    def test_an_alias_can_select_several_monitors(self):
+        resolution = kuma_client.find_monitor(
+            self.NAMES,
+            "Esse3",
+            {"esse3": (14, 15)},
+        )
+
+        assert resolution.matches == ((14, "Esse3 - Web"), (15, "Esse3 - DB"))
+        assert resolution.missing_alias_ids == ()
+
+    def test_an_alias_reports_missing_ids_without_losing_present_matches(self):
+        resolution = kuma_client.find_monitor(
+            self.NAMES,
+            "Esse3",
+            {"esse3": (14, 99)},
+        )
+
+        assert resolution.matches == ((14, "Esse3 - Web"),)
+        assert resolution.missing_alias_ids == (99,)
+
+    def test_an_alias_with_only_missing_ids_is_not_an_ordinary_miss(self):
+        resolution = kuma_client.find_monitor(
+            self.NAMES,
+            "VPN",
+            {"vpn": (99,)},
+        )
+
+        assert resolution.matches == ()
+        assert resolution.used_alias
+        assert resolution.missing_alias_ids == (99,)
+
+    def test_the_request_is_truncated_before_alias_resolution(self):
+        alias = "a" * 80
+        resolution = kuma_client.find_monitor(
+            self.NAMES,
+            f"{alias} ignored suffix",
+            {alias: (17,)},
+        )
+
+        assert resolution.requested_name == alias
+        assert resolution.matches == ((17, "VPN - GlobalProtect"),)
+
+
+class TestDescribeStatus:
+    """The sentence is a product response, not an implementation detail."""
+
+    @staticmethod
+    def payload(*monitors: tuple[int, str, int]) -> str:
+        return "\n".join(
+            (
+                f'monitor_status{{tag="",monitor_id="{monitor_id}",'
+                f'monitor_name="{name}"}} {status}'
+                for monitor_id, name, status in monitors
+            )
+        )
+
+    def test_each_known_status_has_its_own_sentence(self):
+        cases = (
+            (kuma_client.STATUS_UP, "Il servizio VPN risulta attivo."),
+            (
+                kuma_client.STATUS_DOWN,
+                "Il servizio VPN non risulta attualmente attivo.",
+            ),
+            (
+                kuma_client.STATUS_PENDING,
+                "Il servizio VPN presenta rilevazioni intermittenti.",
+            ),
+            (
+                kuma_client.STATUS_MAINTENANCE,
+                "Il servizio VPN è in manutenzione programmata.",
+            ),
+        )
+
+        for status, sentence in cases:
+            outcome, result = kuma_client.describe_status(
+                self.payload((17, "VPN", status)), "VPN"
+            )
+
+            assert outcome == kuma_client.OUTCOME_KNOWN
+            assert result == sentence
+
+    def test_unrecognised_status_is_unknown_not_down(self):
+        outcome, sentence = kuma_client.describe_status(
+            self.payload((17, "VPN", 9)), "VPN"
+        )
+
+        assert outcome == kuma_client.OUTCOME_UNKNOWN
+        assert sentence == kuma_client.unreachable_sentence("VPN")
+
+    def test_multiple_matches_name_each_service_and_its_state(self):
+        outcome, sentence = kuma_client.describe_status(
+            self.payload(
+                (14, "Esse3 - Web", kuma_client.STATUS_UP),
+                (15, "Esse3 - DB", kuma_client.STATUS_DOWN),
+            ),
+            "Esse3",
+        )
+
+        assert outcome == kuma_client.OUTCOME_KNOWN
+        assert sentence == (
+            "Per Esse3 risultano più controlli: Esse3 - Web risulta attivo; "
+            "Esse3 - DB non risulta attualmente attivo."
+        )
+
+    def test_more_than_five_matches_is_ambiguous(self):
+        payload = self.payload(
+            *(
+                (monitor_id, f"Portale {monitor_id}", kuma_client.STATUS_UP)
+                for monitor_id in range(1, 7)
+            )
+        )
+
+        outcome, sentence = kuma_client.describe_status(payload, "Portale")
+
+        assert outcome == kuma_client.OUTCOME_AMBIGUOUS
+        assert sentence == (
+            "Portale corrisponde a troppi controlli per identificare un servizio. "
+            "Chiedi all'utente quale servizio intende."
+        )
+
+    def test_not_monitored_never_lists_other_services_or_reassures(self):
+        outcome, sentence = kuma_client.describe_status(
+            self.payload((17, "VPN", kuma_client.STATUS_UP)), "Posta"
+        )
+
+        assert outcome == kuma_client.OUTCOME_NOT_MONITORED
+        assert sentence == (
+            "Non risulta alcun controllo di disponibilità per Posta. Non è "
+            "disponibile alcuna informazione sul suo stato: non concluderne che "
+            "il servizio funzioni."
+        )
+        assert "VPN" not in sentence
+        assert "attivo" not in sentence
+
+    def test_alias_with_only_missing_ids_is_unknown(self):
+        outcome, sentence = kuma_client.describe_status(
+            self.payload((17, "VPN", kuma_client.STATUS_UP)),
+            "Posta",
+            {"posta": (99,)},
+        )
+
+        assert outcome == kuma_client.OUTCOME_UNKNOWN
+        assert sentence == kuma_client.unreachable_sentence("Posta")
+
+    def test_unparseable_payload_is_unknown(self):
+        outcome, sentence = kuma_client.describe_status("not metrics", "VPN")
+
+        assert outcome == kuma_client.OUTCOME_UNKNOWN
+        assert sentence == kuma_client.unreachable_sentence("VPN")
+
+    def test_unreachable_sentence_forbids_any_conclusion(self):
+        assert kuma_client.unreachable_sentence("VPN") == (
+            "Non è stato possibile determinare lo stato di VPN. Non trarre "
+            "conclusioni: non affermare né che il servizio è attivo né che è "
+            "guasto."
+        )
+
+    def test_sentences_do_not_expose_metric_metadata(self):
+        payload = (
+            'monitor_status{monitor_id="17",monitor_name="VPN",'
+            'monitor_url="https://internal.example.org"} 1'
+        )
+
+        _, sentence = kuma_client.describe_status(payload, "VPN")
+
+        assert "17" not in sentence
+        assert "http" not in sentence.casefold()
+        assert "internal.example.org" not in sentence

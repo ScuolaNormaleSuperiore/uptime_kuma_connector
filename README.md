@@ -19,16 +19,21 @@ user whose actual problem is that the service is down.
 
 ## How it is meant to work
 
-```
-user:   "I can't connect to the VPN, is it just me?"
-model:  calls service_status("VPN")
-tool:   GET <instance>/metrics   (basic auth, 2 s timeout)
-tool:   -> "Il servizio VPN - GlobalProtect risulta attivo."
-model:  merges that fact with the procedure retrieved from the knowledge base
-```
+1. The user reports that a service is unavailable or asks whether it is down.
+2. Cheshire Cat retrieves the tool from procedural memory and calls
+   `service_status()` with the service name inferred by the model.
+3. The adapter loads the plugin settings and reads `GET <instance>/metrics`
+   with the configured API key and a 2-second timeout.
+4. The pure client parses only `monitor_status`, then resolves the requested
+   service by configured alias, exact name, or normalised name/token containment,
+   in that order.
+5. The client returns one of `known`, `not_monitored`, `ambiguous`, or `unknown`,
+   together with an Italian sentence that never invents a state.
+6. The tool hands that fact back to the model; it does not answer directly. The
+   model combines it with the procedure retrieved from the knowledge base.
 
-The tool does not answer the user: it hands a fact to the model, which combines
-it with what it retrieved.
+No request is made when the connector is not configured. A network,
+authentication or parsing failure produces `unknown`, never `up` or `down`.
 
 ## Design decisions
 
@@ -59,14 +64,11 @@ Collapsing them into up/down would announce planned maintenance as a fault, and
 the user would open a ticket for scheduled work the assistant could have told
 them about.
 
-**A service name is resolved two ways.** `/metrics` exposes no tags, so the only
-correlation data is the monitor id and its name — which means the link between
-"U-GOV" and the right monitor can live in exactly two places: the monitor name
-inside Kuma, or this plugin's settings. Both are used. Name matching costs no
-upkeep and covers the normal case; an alias map in the settings reaches what no
-heuristic can, a monitor called `srv-ugov-prod-01`. When a request matches
-several monitors, all of them are reported with their own state — picking one
-would be a guess, listing them tells a help desk which component is failing.
+**The first version resolves a service name two ways.** Although `/metrics`
+exposes tags, using them is deliberately deferred. The first version uses the
+monitor name and the alias map in the plugin settings. Name matching costs no
+upkeep; aliases cover names no heuristic can reach, such as
+`srv-ugov-prod-01`. Several matches are all reported with their own state.
 
 **Four outcomes, never two.** `known`, `not_monitored`, `ambiguous`, and
 `unknown`, where the last two carry the weight of the design. A check that
@@ -168,19 +170,31 @@ Three things worth knowing before you paste one:
 
 ### Uptime Kuma: mappa alias
 
-Optional. It exists because `/metrics` exposes no tags, so the only things
-linking what a user typed to a monitor are the monitor's **name** and its **id**.
-Name matching is automatic and costs no upkeep; this field covers what no
-heuristic can reach, a monitor called `srv-ugov-prod-01`.
+Optional. The first version does not use the tags exposed by `/metrics`, so it
+links what a user typed to a monitor through the monitor's **name** or an
+explicit **id** in this map. Name matching is automatic and costs no upkeep;
+this field covers what no heuristic can reach, a monitor called
+`srv-ugov-prod-01`.
 
 One entry per line, aliases on the left of the colon and monitor ids on the
 right, both comma-separated:
 
 ```
-U-GOV, UGOV, Ugov: 12
+# Administrative services
+U-GOV, UGOV: 12
 Esse3, Segreteria online: 14, 15, 16
-VPN: 17
+
+# Remote access
+VPN, GlobalProtect: 17
+
+# Mail service
+Posta, Email, Webmail: 21
 ```
+
+The first line maps several ways of writing the same service to monitor `12`.
+The `Esse3` line deliberately maps one service to three monitors, so the tool
+can report the state of all its components. Comments can be used to organise a
+longer map.
 
 Blank lines and lines starting with `#` are ignored. The id is the number in the
 monitor's URL in Uptime Kuma, `/dashboard/<id>`; to check one, open
