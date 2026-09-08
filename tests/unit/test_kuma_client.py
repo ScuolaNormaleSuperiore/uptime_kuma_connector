@@ -362,6 +362,13 @@ class TestFindMonitor:
         assert resolution.matches == ((17, "VPN - GlobalProtect"),)
 
 
+class TestMonitoredServiceNames:
+    def test_names_keep_the_metric_order_and_exclude_ids(self):
+        assert kuma_client.monitored_service_names(
+            {17: "VPN - GlobalProtect", 14: "Esse3 - Web"}
+        ) == ("VPN - GlobalProtect", "Esse3 - Web")
+
+
 class TestDescribeStatus:
     """The sentence is a product response, not an implementation detail."""
 

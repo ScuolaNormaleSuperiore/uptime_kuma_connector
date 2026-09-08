@@ -35,6 +35,14 @@ user whose actual problem is that the service is down.
 No request is made when the connector is not configured. A network,
 authentication or parsing failure produces `unknown`, never `up` or `down`.
 
+### Cheshire Cat prerequisite
+
+`procedural_memory_k` (`k`) is the number of tools Cheshire Cat retrieves as
+candidates for a user message. With `k = 0`, no tool is retrieved, so
+`service_status` can never be called even when this plugin is enabled and
+configured. Keep `k` at least `1`; the local instance uses `3`. Verify the
+value on the target deployment before going live.
+
 ## Design decisions
 
 Five choices the rest depends on. Each is argued in full in the specification;
@@ -263,8 +271,8 @@ nothing back.
 
 1. Confirm the shape of `/metrics` against a real instance, and whether
    `monitor_status` emits `2` and `3` as well as `0` and `1`.
-2. Check that procedural memory is enabled on the target instance. Tools live
-   there, and with `k = 0` the tool is never retrieved and never invoked.
+2. Verify the [procedural-memory prerequisite](#cheshire-cat-prerequisite) on
+   the target instance.
 3. Choose a licence and add the file — the registry requires open source.
 4. Land the initial commit and push it, after `git config core.hooksPath
    .githooks`: the repository at

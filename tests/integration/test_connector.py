@@ -1,9 +1,8 @@
 """Tests for the Cheshire Cat adapter.
 
-**No behaviour is implemented, so there is no behaviour to test.** What is left
-is the structure and the checks that hold anyway: that the plugin loads, that it
-registers what it claims to register, and — the reason this file exists now
-rather than later — that it registers nothing it does not yet implement.
+The plugin now registers its status tool. These structural tests assert that it
+loads and exposes the intended integration points; phase 3 adds the behavioural
+tests with a fake Cat and a mocked HTTP call.
 
 These need the core importable, because the module under test imports `cat.log`
 and `cat.mad_hatter.decorators` at import time. They never contact a live
@@ -24,7 +23,6 @@ The tests to write once the implementation starts are listed in
 - the tool never raises, whatever the call does
 """
 
-import ast
 import sys
 from pathlib import Path
 
@@ -109,23 +107,11 @@ class TestPluginLoads:
         assert any("plugin activated" in line for line in lines)
 
 
-class TestNothingIsWiredYet:
-    """The invariant that keeps an empty plugin honest.
-
-    A skeleton that registers a tool would claim a capability it does not have:
-    the model would see `service_status` among its options, call it, and get
-    nothing back. These tests fail the moment something is wired without being
-    implemented — which is exactly when someone would otherwise not notice.
-    """
-
-    def test_no_tool_is_registered(self):
-        registered = [
-            name
-            for name, value in vars(connector).items()
-            if hasattr(value, "procedure_type")
-        ]
-
-        assert registered == [], f"tools registered with no implementation: {registered}"
+class TestToolWiring:
+    def test_service_status_is_a_non_direct_tool(self):
+        assert connector.service_status.procedure_type == "tool"
+        assert connector.service_status.return_direct is False
+        assert "VPN" in connector.service_status.description
 
     def test_no_flow_hook_is_registered(self):
         registered = [
@@ -135,21 +121,6 @@ class TestNothingIsWiredYet:
         ]
 
         assert registered == [], f"hooks registered with no implementation: {registered}"
-
-    def test_the_adapter_makes_no_network_call(self):
-        # No httpx import yet, and therefore no request, no timeout and no
-        # failure path. `requirements.txt` declares httpx ahead of use on
-        # purpose: a dependency missing at activation time is the expensive
-        # failure, so it is declared before the first line that needs it.
-        tree = ast.parse(Path(connector.__file__).read_text(encoding="utf-8"))
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module.split(".")[0])
-
-        assert not imported & {"httpx", "requests", "urllib", "http", "aiohttp"}
 
     def test_the_api_key_field_exists_and_is_the_only_source(self):
         # Reversed on 2026-09-08: the key is configured in the panel and read

@@ -1,35 +1,21 @@
 """Uptime Kuma Connector: Cheshire Cat adapter.
 
-**The configuration is wired; the behaviour is not.** The plugin loads, exposes
-the two settings the specification calls for, reads and validates them, decides
-whether the connector is usable, and reports configuration problems in the log.
-It still makes no request to Uptime Kuma and answers no question. The
-specification is `DOC/Specifiche.md`.
-
-What is deliberately absent, and must stay absent until it is implemented:
-
-- **no `@tool`**, so nothing can invoke the empty decision logic by accident
-- **no flow hook**, so no conversation is touched
-- **no network call**, so no timeout and no failure path exists yet
-
-Only the activation announcement is registered. It is a diagnostic rather than a
-feature, and it is the one thing no per-turn line can report: a plugin that
-fails to load registers nothing, so silence is what a broken activation shares
-with a plugin that simply has nothing to say. Right now it says out loud that
-nothing is implemented, which is the honest message.
-
-When the implementation starts, the shape is:
+The plugin loads, validates its settings, and exposes one tool that reads the
+current status of a service. Its shape is:
 
     settings -> is_usable() -> httpx GET /metrics (basic auth, 2 s timeout)
              -> kuma_client.describe_status() -> sentence for the model
 
-with every failure caught and turned into the `unknown` outcome, and with no
-state kept between turns: the status is read when the question arrives. See
+Every failure is caught and becomes the `unknown` outcome. No state is kept
+between turns: the status is read when the question arrives. See
 Specifiche.md, sections 2.2 and 2.5.
 """
 
+from difflib import SequenceMatcher
+
+import httpx
 from cat.log import log
-from cat.mad_hatter.decorators import plugin
+from cat.mad_hatter.decorators import plugin, tool
 
 try:
     from . import kuma_client
@@ -122,6 +108,46 @@ def alias_map(settings: UptimeKumaConnectorSettings) -> dict:
     return aliases
 
 
+def _closest_monitor_names(service_name: str, names: tuple[str, ...]) -> tuple[str, ...]:
+    """Return at most three names useful to an administrator diagnosing a miss."""
+    wanted = kuma_client.normalise_name(service_name)
+    ranked = sorted(
+        names,
+        key=lambda name: SequenceMatcher(
+            None, wanted, kuma_client.normalise_name(name)
+        ).ratio(),
+        reverse=True,
+    )
+    return tuple(ranked[:3])
+
+
+def _report_resolution_problems(payload: str, service_name: str, aliases: dict) -> None:
+    """Log administrator-only diagnostics without adding them to the model text."""
+    names, _statuses = kuma_client.parse_monitor_metrics(payload)
+    resolution = kuma_client.find_monitor(names, service_name, aliases)
+
+    if resolution.missing_alias_ids:
+        missing = ", ".join(
+            str(monitor_id) for monitor_id in resolution.missing_alias_ids
+        )
+        log.warning(
+            "[uptime-kuma] alias "
+            f"'{resolution.requested_name}' refers to monitor ids absent from "
+            f"/metrics: {missing}."
+        )
+
+    if not resolution.matches and not resolution.used_alias:
+        closest = _closest_monitor_names(
+            resolution.requested_name,
+            tuple(kuma_client.monitored_service_names(names)),
+        )
+        suffix = f" Closest monitor names: {', '.join(closest)}." if closest else ""
+        log.warning(
+            "[uptime-kuma] no monitor matches "
+            f"'{resolution.requested_name}'.{suffix}"
+        )
+
+
 # Remembers what was already reported, so a problem is logged when it appears
 # rather than on every turn. Module state resets when the core reloads the
 # plugin, which is the moment a fresh report is wanted anyway.
@@ -179,24 +205,47 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         log.warning(f"[uptime-kuma] alias map, {problem}")
 
 
-def service_status(service_name, cat):
-    """Report whether a monitored service is currently up.
+@tool(return_direct=False)
+def service_status(service_name: str, cat) -> str:
+    """Verifica se un servizio è attivo quando l'utente segnala un problema.
 
-    Not implemented, and **not registered as a tool**: it is a plain function so
-    that nothing can invoke it while it decides nothing.
-
-    When it becomes a tool it takes `return_direct=False`, because it does not
-    answer the user — it hands a fact to the model, which merges it with the
-    procedure retrieved from the knowledge base. Its docstring is what the model
-    reads to decide whether to call it, so it will have to be written in the
-    language the users write in.
+    Usalo per domande come «la VPN non funziona», «non riesco ad autenticarmi su
+    U-GOV», «non riesco ad accedere a Esse3», «il portale è giù?» o «è un
+    problema mio o del servizio?». Passa il nome del servizio chiesto dall'utente.
     """
-    return ""
+    try:
+        settings = load_settings(cat)
+        if not is_usable(settings):
+            return kuma_client.unreachable_sentence(service_name)
+
+        api_key = resolve_api_key(settings)
+        aliases = alias_map(settings)
+        response = httpx.get(
+            kuma_client.metrics_url(settings.base_url),
+            headers={"Authorization": kuma_client.basic_auth_header(api_key)},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.text
+        _outcome, sentence = kuma_client.describe_status(
+            payload, service_name, aliases
+        )
+        _report_resolution_problems(payload, service_name, aliases)
+        return sentence
+    except Exception as failure:
+        # The exception text may contain the URL, the Authorization header, or
+        # an echoed credential. Its type gives operations enough to diagnose a
+        # failure without taking that risk.
+        log.warning(
+            "[uptime-kuma] could not read the monitoring endpoint "
+            f"({type(failure).__name__}); the status is unknown."
+        )
+        return kuma_client.unreachable_sentence(service_name)
 
 
 @plugin
 def activated(plugin):
-    """Announce that the plugin loaded, and how far the implementation got.
+    """Announce that the plugin loaded.
 
     `activated` rather than `after_cat_bootstrap`, and the two are not
     interchangeable: `after_cat_bootstrap` runs once when the core starts, so it
@@ -209,8 +258,6 @@ def activated(plugin):
     first turn that reads it instead.
     """
     log.info(
-        "[uptime-kuma] plugin activated. Settings are wired and validated; no "
-        "behaviour is implemented yet: no tool is registered, no hook is "
-        "registered, and no request is made to Uptime Kuma. See "
-        "DOC/Specifiche.md for the specification to build."
+        "[uptime-kuma] plugin activated. The service_status tool reads "
+        "Uptime Kuma on demand; no flow hook or cache is used."
     )

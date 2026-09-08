@@ -360,12 +360,12 @@ def _truncate_service_name(value: str) -> str:
 def monitored_service_names(names: Mapping[int, str]) -> Sequence[str]:
     """Every monitor name, for diagnosing a miss in the adapter log.
 
-    Not implemented. These names never enter the `not_monitored` sentence:
-    offering the model other services could make it answer about the wrong
-    one. The adapter may instead log at most three close names for an
-    administrator. See Specifiche.md, section 3.4.
+    These names never enter the `not_monitored` sentence: offering the model
+    other services could make it answer about the wrong one. The adapter may
+    instead log at most three close names for an administrator. See
+    Specifiche.md, section 3.4.
     """
-    return ()
+    return tuple(names.values())
 
 
 def describe_status(
