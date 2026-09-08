@@ -65,20 +65,32 @@ patterns=(
 	'github_pat_[A-Za-z0-9_]{20,}'
 	'xox[baprs]-[A-Za-z0-9-]{10,}'
 	'sk-[A-Za-z0-9]{20,}'
-	# The Uptime Kuma push URL, and the one credential this plugin actually
-	# handles. The token is a *path segment* of the push endpoint rather than a
-	# header or a query parameter, so it travels inside anything that carries the
-	# URL: a curl command pasted into a note, a test fixture, a docstring written
-	# while debugging.
+	# The API key of the Uptime Kuma instance: the one credential this plugin
+	# handles, read from UPTIME_KUMA_API_KEY and deliberately absent from the
+	# settings model.
 	#
-	# The pattern matches the endpoint shape rather than the token's own alphabet,
-	# on purpose. Uptime Kuma generates the token itself and its length and
-	# character set are not documented as a contract, so a pattern built on a
-	# guessed shape would be the kind that silently stops matching. The endpoint
-	# path, by contrast, is what the wiki documents.
+	# It leaks in a shape none of the generic patterns sees, because it is
+	# neither an assignment nor a path segment: it travels **base64-encoded
+	# inside an Authorization header**, by the convention of Uptime Kuma — basic
+	# auth with an empty username and the key as the password. The two forms it
+	# takes when somebody reproduces a call while debugging are a `Basic` header
+	# and a `curl -u` invocation, so both are matched.
+	#
+	# The patterns describe the *carrier* and not the value, deliberately. Uptime
+	# Kuma does not document the key's length or character set as a contract, so
+	# a pattern built on a guessed alphabet would be the kind that silently stops
+	# matching — the failure mode that matters most in a secret scan.
+	#
+	# The bound of 16 base64 characters keeps the word `Basic` in prose from
+	# matching: base64 of a key short enough to fall below it would not be a key
+	# worth protecting.
+	$'[Aa]uthorization[[:space:]]*:?[[:space:]]*["\x27]?Basic[[:space:]]+[A-Za-z0-9+/=]{16,}'
+	'curl[[:space:]][^;|]*[[:space:]]-(u|-user)[[:space:]]+[^[:space:]]{4,}'
+	# Kept from the dropped push design: it costs nothing and still catches a
+	# paste from that earlier version or from an unrelated Uptime Kuma note.
 	'/api/push/[A-Za-z0-9]{6,}'
 	'[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+:[^[:space:]]+@[^[:space:]]+'
-	$'(api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|push[_-]?token|password|passwd|pwd|secret)[[:space:]]*[:=][[:space:]]*["\x27][^"\x27]{8,}["\x27]'
+	$'(api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|push[_-]?token|api[_-]?secret|password|passwd|pwd|secret)[[:space:]]*[:=][[:space:]]*["\x27][^"\x27]{8,}["\x27]'
 )
 
 found=0

@@ -545,6 +545,11 @@ chiamata si registra **il tipo** dell'eccezione, non il suo testo.
 Ognuno corrisponde a un errore realmente possibile, non a una copertura
 formale.
 
+I test unitari si eseguono in locale con `python run-tests.py --unit`; quelli
+di integrazione, che importano il core Cheshire Cat dal container, con
+`python run-tests.py --integration`. `python run-tests.py` esegue entrambi i
+livelli e `--detailed` mostra il nome di ogni test.
+
 **Sulla logica pura**, senza Cheshire Cat e senza rete:
 
 - parsing di `/metrics` su una **risposta reale**, non su un mock scritto a

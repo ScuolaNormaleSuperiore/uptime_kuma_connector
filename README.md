@@ -84,6 +84,7 @@ The invariant, in four words: **never invent a state.**
 | `kuma_client.py` | All decision logic: URL, auth header, `/metrics` parsing, name resolution, the sentence for the model | **No** |
 | `uptime_kuma_connector.py` | The Cheshire Cat adapter: settings, HTTP, the tool | Yes |
 | `settings.py` | The admin settings model | Yes |
+| `run-tests.py` | Test runner for local unit tests and container integration tests | No |
 | `tests/unit/` | Pure logic. Plain `pytest`, no Cheshire Cat | No |
 | `tests/integration/` | Adapter wiring, against the core as an interpreter | Yes |
 | `DOC/Specifiche.md` | The specification, in Italian | — |
@@ -131,16 +132,22 @@ the packages and fails at import on a clean one.
 
 ## Testing
 
-```bash
-python -m pytest tests/unit
-```
-
-The full suite needs the core importable, in practice the running container:
+Unit tests use the local Python interpreter:
 
 ```bash
-docker compose exec -w /app/cat/plugins/uptime_kuma_connector \
-    cheshire-cat-core python -m pytest
+python run-tests.py --unit
 ```
+
+Integration tests need the core importable and run inside the Cheshire Cat
+container:
+
+```bash
+python run-tests.py --integration
+```
+
+Run the full suite with `python run-tests.py`. Add `--detailed` to any command
+to list every test name. The runner reports how to start `cheshire-cat-core` if
+the container is not running.
 
 What the current tests check is not behaviour — there is none — but the
 invariants of an empty plugin: that the pure module imports nothing from `cat`,
