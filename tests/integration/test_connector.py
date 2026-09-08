@@ -9,8 +9,7 @@ These need the core importable, because the module under test imports `cat.log`
 and `cat.mad_hatter.decorators` at import time. They never contact a live
 instance: the container is used as an interpreter, not as a server.
 
-    docker compose exec -w /app/cat/plugins/uptime_kuma_connector \\
-        cheshire-cat-core python -m pytest
+    python run-tests.py --integration
 
 The tests to write once the implementation starts are listed in
 `DOC/Specifiche.md`, section 6. The ones that belong here:

@@ -500,12 +500,6 @@ La mappa degli alias chiede al pannello una casella multiriga, perché il format
 è una voce per riga e un'installazione con una decina di servizi sarebbe
 altrimenti da modificare dentro un campo a riga singola che scorre di lato.
 
-Il modo per chiederlo ha una trappola, e viene dal plugin `rag-guardrails`: il
-pannello legge `extra.type` dallo schema JSON pubblicato, quindi il marcatore va
-annidato dentro un oggetto `extra` mentre `type` conserva il suo valore reale,
-`string`. Scriverlo direttamente come `type` **sostituisce** il tipo, pubblica
-qualcosa che non è un tipo JSON Schema valido e mette il marcatore dove il
-pannello non guarda: il campo torna a riga singola e nessuno segnala niente.
 Due test coprono le due metà.
 
 Nell'ambiente, mai nel pannello:

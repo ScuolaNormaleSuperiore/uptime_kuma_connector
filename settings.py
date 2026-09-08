@@ -58,10 +58,6 @@ SECURE_SCHEME = "https"
 # publishes something that is not a valid JSON Schema type and puts the marker
 # where the panel never looks: the field renders as a single-line input and
 # nothing anywhere reports a problem.
-#
-# Taken from the sibling `rag-guardrails` plugin, which found this the hard way.
-# `Field(extra={...})` produces the same schema and is what the older plugins on
-# this instance use, but it is a deprecated Pydantic v2 spelling.
 TEXT_AREA = {"extra": {"type": "TextArea"}}
 
 

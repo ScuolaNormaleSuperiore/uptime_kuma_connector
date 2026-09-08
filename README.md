@@ -89,8 +89,6 @@ The invariant, in four words: **never invent a state.**
 | `tests/integration/` | Adapter wiring, against the core as an interpreter | Yes |
 | `DOC/Specifiche.md` | The specification, in Italian | — |
 
-The split keeps the logic testable without a running Cat and the adapter thin
-enough to read. It is taken from the sibling `rag-guardrails` plugin.
 
 ## Out of scope
 
