@@ -7,8 +7,7 @@ current status of a service. Its shape is:
              -> kuma_client.describe_status() -> sentence for the model
 
 Every failure is caught and becomes the `unknown` outcome. No state is kept
-between turns: the status is read when the question arrives. See
-Specifiche.md, sections 2.2 and 2.5.
+between turns: the status is read when the question arrives.
 """
 
 from difflib import SequenceMatcher
@@ -26,7 +25,7 @@ except ImportError:  # pragma: no cover - depends on how the module is loaded
 
 # The call sits inside the turn, in front of a waiting user. A background job
 # would allow ten seconds; here that would be ten seconds of silence in a
-# conversation. See Specifiche.md, section 2.5.
+# conversation.
 REQUEST_TIMEOUT_SECONDS = 2.0
 
 
@@ -93,7 +92,7 @@ def is_usable(settings: UptimeKumaConnectorSettings) -> bool:
     One function rather than two checks scattered around, because in an
     analogous integration already in production it happened twice that one place
     tested only the identifier and showed a monitoring indicator with the
-    integration switched off. See Specifiche.md, section 5.
+    integration switched off.
     """
     return bool(settings.base_url) and bool(resolve_api_key(settings))
 
@@ -184,7 +183,7 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         # `base64(":" + key)` in a Basic Auth header, which is an encoding and
         # not encryption, so on plain HTTP the credential is readable by
         # anything that sees the traffic. Negligible on a container network,
-        # real across a campus LAN. See Specifiche.md, section 2.3.
+        # real across a campus LAN.
         log.warning(
             "[uptime-kuma] the instance URL is not HTTPS: the API key will "
             "travel in clear text on every call. Acceptable only if that "

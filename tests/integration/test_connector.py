@@ -1,8 +1,7 @@
 """Tests for the Cheshire Cat adapter.
 
-The plugin now registers its status tool. These structural tests assert that it
-loads and exposes the intended integration points; phase 3 adds the behavioural
-tests with a fake Cat and a mocked HTTP call.
+The plugin registers its status tool. These tests assert both its structural
+integration points and its behaviour with a fake Cat and a mocked HTTP call.
 
 These need the core importable, because the module under test imports `cat.log`
 and `cat.mad_hatter.decorators` at import time. They never contact a live
@@ -10,8 +9,7 @@ instance: the container is used as an interpreter, not as a server.
 
     python run-tests.py --integration
 
-The tests to write once the implementation starts are listed in
-`DOC/Specifiche.md`, section 6. The ones that belong here:
+The cases that belong here are:
 
 - connector not configured: no network call is attempted
 - URL configured but API key missing: no call, outcome `unknown`
@@ -52,8 +50,7 @@ if not __name__.startswith("cat.plugins."):
 
 class TestPluginLoads:
     def test_the_settings_model_is_exposed_to_the_admin_panel(self):
-        # The core builds the form from this. It answers with an empty model on
-        # purpose: the plugin reads no configuration because it does nothing.
+        # The core builds the settings form from this model.
         assert settings_module.settings_model.function() is (
             settings_module.UptimeKumaConnectorSettings
         )
@@ -62,7 +59,7 @@ class TestPluginLoads:
         # Three, and the absences are decisions: no timeout, no cache, no
         # general switch. Asserting the exact set rather than the presence of
         # each is what makes adding a fourth field a deliberate act instead of
-        # an accident. See Specifiche.md, section 5.
+        # an accident.
         schema = settings_module.UptimeKumaConnectorSettings.model_json_schema()
 
         assert set(schema["properties"]) == {"base_url", "api_key", "alias_map"}
@@ -126,7 +123,7 @@ class TestToolWiring:
         # Reversed on 2026-09-08: the key is configured in the panel and read
         # from there alone. One source, because a field plus an environment
         # fallback are two places that can disagree with no way to see which
-        # one an instance is using. See Specifiche.md, section 2.3.
+        # one an instance is using.
         schema = settings_module.UptimeKumaConnectorSettings.model_json_schema()
 
         assert "api_key" in schema["properties"]
@@ -135,9 +132,143 @@ class TestToolWiring:
         ) == "a-key"
 
 
+class FakeHttpResponse:
+    def __init__(self, text, failure=None):
+        self.text = text
+        self.failure = failure
+
+    def raise_for_status(self):
+        if self.failure is not None:
+            raise self.failure
+
+
+class TestServiceStatusBehaviour:
+    """Phase 3: every adapter failure is an honest `unknown` response."""
+
+    VALID_PAYLOAD = (
+        'monitor_status{monitor_id="17",monitor_name="VPN - GlobalProtect"} 1'
+    )
+
+    @staticmethod
+    def call(stored, service_name="VPN"):
+        return connector.service_status.function(service_name, FakeCat(stored))
+
+    def test_an_unconfigured_connector_makes_no_network_call(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(connector.httpx, "get", lambda *args, **kwargs: calls.append(1))
+
+        sentence = self.call({})
+
+        assert calls == []
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+
+    def test_a_url_without_a_key_makes_no_network_call(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(connector.httpx, "get", lambda *args, **kwargs: calls.append(1))
+
+        sentence = self.call({"base_url": "https://kuma.example.org"})
+
+        assert calls == []
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+
+    def test_an_unreachable_instance_is_unknown(self, monkeypatch):
+        def unreachable(*_args, **_kwargs):
+            raise connector.httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(connector.httpx, "get", unreachable)
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert "Non trarre conclusioni" in sentence
+
+    def test_http_401_is_unknown_and_the_key_is_not_logged(self, monkeypatch):
+        canary = "uk1-do-not-log-this-value"
+        lines = []
+        request = connector.httpx.Request("GET", "https://kuma.example.org/metrics")
+        response = connector.httpx.Response(401, request=request)
+        failure = connector.httpx.HTTPStatusError(
+            "unauthorised", request=request, response=response
+        )
+        monkeypatch.setattr(
+            connector.httpx,
+            "get",
+            lambda *_args, **_kwargs: FakeHttpResponse("", failure),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": canary}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert lines
+        assert not any(canary in line for line in lines)
+        assert any("HTTPStatusError" in line for line in lines)
+
+    def test_the_request_uses_the_metrics_url_auth_header_and_timeout(self, monkeypatch):
+        captured = {}
+
+        def successful_get(url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return FakeHttpResponse(self.VALID_PAYLOAD)
+
+        monkeypatch.setattr(connector.httpx, "get", successful_get)
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == "Il servizio VPN - GlobalProtect risulta attivo."
+        assert captured["url"] == "https://kuma.example.org/metrics"
+        assert captured["timeout"] == connector.REQUEST_TIMEOUT_SECONDS == 2.0
+        assert captured["headers"]["Authorization"] == (
+            connector.kuma_client.basic_auth_header("read-key")
+        )
+
+    def test_the_tool_never_raises_when_the_http_client_does(self, monkeypatch):
+        def unexpected_failure(*_args, **_kwargs):
+            raise RuntimeError("unexpected client failure")
+
+        monkeypatch.setattr(connector.httpx, "get", unexpected_failure)
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+
+    def test_not_monitored_logs_at_most_three_close_names(self, monkeypatch):
+        payload = "\n".join(
+            f'monitor_status{{monitor_id="{number}",monitor_name="{name}"}} 1'
+            for number, name in enumerate(
+                ("Posta", "Portale", "VPN", "Esse3", "U-GOV"), start=1
+            )
+        )
+        lines = []
+        monkeypatch.setattr(
+            connector.httpx, "get", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"},
+            "Archivio",
+        )
+
+        assert sentence.startswith("Non risulta alcun controllo")
+        diagnostic = next(line for line in lines if "Closest monitor names" in line)
+        assert diagnostic.count(",") == 2
+
+
 class TestTheInstanceUrlValidator:
     """Strict on save, because the panel shows the error while the person who
-    typed it is still looking at the form. See Specifiche.md, section 5."""
+    typed it is still looking at the form."""
 
     def build(self, url):
         return settings_module.UptimeKumaConnectorSettings(base_url=url)
@@ -164,7 +295,7 @@ class TestTheInstanceUrlValidator:
     def test_http_is_accepted(self):
         # A decision, not an oversight: the deployment may reach Uptime Kuma
         # over a container network, where the exposure is negligible. It is
-        # never silent — the adapter warns. See Specifiche.md, section 2.3.
+        # never silent — the adapter warns.
         assert self.build("http://uptime-kuma:3001").base_url == (
             "http://uptime-kuma:3001"
         )
@@ -291,7 +422,7 @@ class TestIsUsableIsTheSinglePoint:
 
     In an analogous integration already in production it happened twice that one
     place tested only the identifier and showed a monitoring indicator with the
-    integration switched off. See Specifiche.md, section 5.
+    integration switched off.
     """
 
     def build(self, url="", key=""):

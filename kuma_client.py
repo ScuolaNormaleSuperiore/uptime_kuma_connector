@@ -1,21 +1,11 @@
 """Pure logic for reading Uptime Kuma. Imports nothing from `cat`, does no I/O.
 
-This module is being implemented incrementally. Functions not reached yet keep
-a neutral body, so the shape of the module matches the specification without
-exposing unfinished behaviour. The specification is `DOC/Specifiche.md`; the
-section numbers below point into it.
-
 Two rules govern this module and are the reason it exists separately:
 
 - it never imports from `cat`, so it can be exercised with `pytest` alone
 - it never performs I/O: the adapter fetches, this module parses and decides
 
-The bodies return neutral values rather than raising `NotImplementedError`. The
-core executes plugin code without a safety net and runs with auto-reload, so an
-exception from a path invoked by mistake becomes either an error shown to a user
-or a failed activation. An inert body is safe; one that raises is a trap. To
-make sure nothing invokes these by accident, the tool and the hook that would
-call them are **not registered** in the adapter either.
+The adapter catches every failure before it can escape into a conversation.
 """
 
 from __future__ import annotations
@@ -27,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 # Uptime Kuma's own status codes, as they appear in the `monitor_status` metric.
 # All four are kept distinct on purpose: collapsing them into up/down would
-# announce planned maintenance as a fault. See Specifiche.md, section 2.4.
+# announce planned maintenance as a fault.
 STATUS_DOWN = 0
 STATUS_UP = 1
 STATUS_PENDING = 2
@@ -37,7 +27,7 @@ STATUS_MAINTENANCE = 3
 # is the honest answer when Uptime Kuma cannot be read, and keeping it distinct
 # from `down` is the point of the whole design. `not_monitored` is a *separate*
 # answer and never a synonym: "no check exists for that service" is certain,
-# while `unknown` is our own malfunction. See Specifiche.md, section 4.
+# while `unknown` is our own malfunction.
 OUTCOME_KNOWN = "known"
 OUTCOME_NOT_MONITORED = "not_monitored"
 OUTCOME_AMBIGUOUS = "ambiguous"
@@ -82,8 +72,7 @@ def normalise_name(value: str) -> str:
     """Fold a service name to the form every comparison is made on.
 
     Applied to all three sides — what the user asked, the monitor names, and the
-    alias keys — so they are always compared in the same shape. See
-    Specifiche.md, section 3.2.
+    alias keys — so they are always compared in the same shape.
 
     The order is load-bearing: the insignificant characters go first, because
     removing them from "U-GOV - Autenticazione" leaves a double space that the
@@ -185,9 +174,9 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
 def metrics_url(base_url: str) -> str:
     """The single endpoint this plugin reads.
 
-    See Specifiche.md, section 2.1: `/metrics` is preferred over the status-page
-    endpoints because one line carries name, id and status together, and
-    because the alternative requires a *published* status page.
+    `/metrics` is preferred over the status-page endpoints because one line
+    carries name, id and status together, and because the alternative
+    requires a *published* status page.
 
     The settings validator owns URL normalisation and removes a trailing slash;
     this function only appends the endpoint. An empty URL stays empty so a
@@ -203,7 +192,7 @@ def basic_auth_header(api_key: str) -> str:
 
     The form is a convention of Uptime Kuma and is not obvious: basic auth with
     an **empty username** and the API key as the password,
-    `base64(":" + api_key)`. See Specifiche.md, section 2.3.
+    `base64(":" + api_key)`.
 
     An empty key returns an empty value so the adapter can recognise an
     unusable configuration without constructing an authentication header.
@@ -264,7 +253,7 @@ def parse_monitor_metrics(payload: str) -> tuple[dict[int, str], dict[int, int]]
 
     A malformed line or a missing label is skipped, never raised on. The label
     format is the part most easily assumed wrong, which is why the fixtures for
-    this function must come from a real response. See Specifiche.md, 3.1 and 6.
+    this function must come from a real response.
     """
     names: dict[int, str] = {}
     statuses: dict[int, int] = {}
@@ -362,8 +351,7 @@ def monitored_service_names(names: Mapping[int, str]) -> Sequence[str]:
 
     These names never enter the `not_monitored` sentence: offering the model
     other services could make it answer about the wrong one. The adapter may
-    instead log at most three close names for an administrator. See
-    Specifiche.md, section 3.4.
+    instead log at most three close names for an administrator.
     """
     return tuple(names.values())
 
@@ -378,7 +366,7 @@ def describe_status(
     Returns `(outcome, sentence)`, where the outcome is one of the four
     constants above and the sentence is what reaches the model. An unparseable
     payload, a broken alias, or an unrecognised status is `unknown`: none may
-    be misreported as a working service. See Specifiche.md, section 4.
+    be misreported as a working service.
     """
     requested_name = _truncate_service_name(service_name)
     names, statuses = parse_monitor_metrics(payload)
@@ -438,7 +426,7 @@ def unreachable_sentence(service_name: str) -> str:
     It states that the status is not verifiable **and** instructs the model not
     to conclude anything: asked "is the VPN down?", a model fills a silence if
     it is allowed to. This is the invariant of the whole plugin — never invent
-    a state. See Specifiche.md, section 4.
+    a state.
     """
     return (
         f"Non è stato possibile determinare lo stato di {_truncate_service_name(service_name)}. "

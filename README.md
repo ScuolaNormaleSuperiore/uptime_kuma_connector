@@ -10,12 +10,11 @@ device — the most common question at a first-level help desk, and the one the
 assistant currently has no data for. It answers with the right procedure to a
 user whose actual problem is that the service is down.
 
-> **Status: the configuration works, the behaviour does not.** The settings are
-> declared, validated and read; no tool is registered, no hook is registered,
-> and no request is made to Uptime Kuma yet.
->
-> The specification to rebuild it from is
-> [`DOC/Specifiche.md`](DOC/Specifiche.md), in Italian.
+> **Status: the first-version behaviour is implemented; verification is in
+> progress.** The settings, pure client and `service_status` tool are wired. The
+> adapter reads `/metrics` on demand with a two-second timeout and turns every
+> failure into an explicit unknown result. The full container suite and a live
+> end-to-end question still have to be verified.
 
 ## How it is meant to work
 
@@ -45,8 +44,7 @@ value on the target deployment before going live.
 
 ## Design decisions
 
-Five choices the rest depends on. Each is argued in full in the specification;
-this is the summary.
+Five choices the rest depends on.
 
 **It reads `/metrics`, not the status page.** Uptime Kuma has no general REST
 API — the dashboard talks Socket.IO after authenticating. Of the public
@@ -99,8 +97,6 @@ The invariant, in four words: **never invent a state.**
 | `run-tests.py` | Test runner for local unit tests and container integration tests | No |
 | `tests/unit/` | Pure logic. Plain `pytest`, no Cheshire Cat | No |
 | `tests/integration/` | Adapter wiring, against the core as an interpreter | Yes |
-| `DOC/Specifiche.md` | The specification, in Italian | — |
-
 
 ## Out of scope
 
@@ -260,12 +256,10 @@ Run the full suite with `python run-tests.py`. Add `--detailed` to any command
 to list every test name. The runner reports how to start `cheshire-cat-core` if
 the container is not running.
 
-What the current tests check is not behaviour — there is none — but the
-invariants of an empty plugin: that the pure module imports nothing from `cat`,
-that the outcomes and the four statuses stay distinct, that the settings
-form is empty, and that **nothing is registered that is not implemented**. That
-last one matters: a skeleton exposing a tool would let the model call it and get
-nothing back.
+The unit tier covers parsing, aliases, resolution and all response outcomes.
+The integration tier covers settings, validators, tool wiring and adapter
+behaviour with a fake Cat and mocked HTTP. Neither tier contacts a live Uptime
+Kuma instance.
 
 ## Before this can be published
 
@@ -274,8 +268,5 @@ nothing back.
 2. Verify the [procedural-memory prerequisite](#cheshire-cat-prerequisite) on
    the target instance.
 3. Choose a licence and add the file — the registry requires open source.
-4. Land the initial commit and push it, after `git config core.hooksPath
-   .githooks`: the repository at
-   [ScuolaNormaleSuperiore/uptime_kuma_connector](https://github.com/ScuolaNormaleSuperiore/uptime_kuma_connector)
-   exists and has no commit yet.
-5. Add `logo.png` — `plugin.json` declares a `thumb` that points at it.
+4. Choose and verify the release version, build the package, and publish the
+   repository so the registry thumbnail resolves.

@@ -5,8 +5,7 @@
 # they are internal topology and must not reach a tracked file. The *shape* is
 # untouched, and the shape is the whole point of this file.
 #
-# Three facts recorded here that the specification had wrong, see
-# DOC/Specifiche.md sections 2.1 and 3.1:
+# Three facts recorded here that an earlier design got wrong:
 #
 #   1. tag labels come FIRST, before monitor_id. A parser anchored on
 #      `monitor_status{monitor_id=` matches nothing on this instance.

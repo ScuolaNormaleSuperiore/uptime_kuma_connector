@@ -1,12 +1,6 @@
 """Tests for the pure Uptime Kuma logic.
 
-**The real tests have been removed together with the implementation.** What is
-left is the structure and one smoke test, so the suite stays runnable and green
-and the `pre-commit` hook keeps working — pytest exits non-zero when it collects
-nothing at all, which would block every commit.
-
-The tests to write are listed in `DOC/Specifiche.md`, section 6. The ones that
-belong here, on the pure logic, with no Cheshire Cat and no network:
+These tests need no Cheshire Cat and no network. They cover:
 
 - parsing of `/metrics` against a **real response**, not a hand-written mock:
   the label format is the part most easily assumed wrong
@@ -44,7 +38,7 @@ if not __name__.startswith("cat.plugins."):
 
 
 class TestModuleContract:
-    """The two properties that must hold even with nothing implemented."""
+    """Structural properties the pure client must always preserve."""
 
     def test_the_pure_module_imports_nothing_from_cat(self):
         # The reason this module exists separately, and the property that keeps
@@ -83,7 +77,7 @@ class TestModuleContract:
 
     def test_the_four_uptime_kuma_statuses_are_distinct(self):
         # Kept distinct on purpose: collapsing them into up/down would announce
-        # planned maintenance as a fault. See Specifiche.md, section 2.4.
+        # planned maintenance as a fault.
         statuses = {
             kuma_client.STATUS_DOWN,
             kuma_client.STATUS_UP,
@@ -94,7 +88,7 @@ class TestModuleContract:
 
 
 class TestNormaliseName:
-    """The fold every comparison is made on. See Specifiche.md, section 3.2."""
+    """The fold every comparison is made on."""
 
     def test_case_and_surrounding_whitespace_do_not_matter(self):
         assert kuma_client.normalise_name("  U-GOV  ") == kuma_client.normalise_name(
@@ -126,7 +120,7 @@ class TestNormaliseName:
 
 
 class TestParseAliasMap:
-    """The admin panel's alias map. See Specifiche.md, section 3.2."""
+    """The admin panel's alias map."""
 
     def test_a_single_alias_maps_to_a_single_id(self):
         aliases, problems = kuma_client.parse_alias_map("VPN: 17")

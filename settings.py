@@ -1,7 +1,6 @@
 """Plugin settings, exposed in the Cheshire Cat admin panel.
 
-Three fields, and the absences matter as much as the fields. See
-`DOC/Specifiche.md`, section 5.
+Three fields, and the absences matter as much as the fields.
 
 - **The API key is a panel field, and the panel is the only place it lives.**
   Decided on 2026-09-08, reversing the earlier environment-only rule: everything
@@ -24,11 +23,10 @@ Three fields, and the absences matter as much as the fields. See
   and Cheshire Cat already has its own switch — deactivating the plugin. A
   second one would be a field that can disagree with the first.
 
-The titles and descriptions are in **Italian**, because the panel is read by the
-same service owners who read `DOC/Specifiche.md`. The code and the comments stay
-in English. One short sentence per description: on this panel a long title plus
-a long description makes the settings page scroll horizontally, past roughly 200
-characters for the pair.
+The titles and descriptions are in **Italian**, because service owners read the
+panel. The code and comments stay in English. One short sentence per description:
+on this panel a long title plus a long description makes the settings page scroll
+horizontally, past roughly 200 characters for the pair.
 
 The validators are deliberately asymmetric, and the asymmetry is the point.
 `base_url` is **strict**, so a typo is refused while the person who made it is
@@ -54,7 +52,7 @@ from cat.mad_hatter.decorators import plugin
 #
 # What must not happen is that the choice becomes invisible: the adapter logs a
 # warning the first time it reads a configuration whose URL is not HTTPS, and
-# again whenever that configuration changes. See `DOC/Specifiche.md`, 2.3.
+# again whenever that configuration changes.
 ACCEPTED_SCHEMES = ("https", "http")
 
 SECURE_SCHEME = "https"
