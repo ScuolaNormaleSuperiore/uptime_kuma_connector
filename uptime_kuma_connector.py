@@ -332,9 +332,16 @@ def service_status(service_name: str, cat) -> str:
         else:
             outcome = kuma_client.OUTCOME_UNKNOWN
             sentence = kuma_client.unreachable_sentence(service_name)
+        resolution_source = (
+            "alias"
+            if resolution.used_alias
+            else "name"
+            if resolution.matches
+            else "none"
+        )
         log.info(
             "[uptime_kuma_connector] monitoring endpoint request succeeded "
-            f"(outcome: {outcome})."
+            f"(outcome: {outcome}, resolution: {resolution_source})."
         )
         _report_resolution_problems(resolution, names)
         return sentence

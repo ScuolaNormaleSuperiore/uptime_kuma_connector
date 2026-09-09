@@ -39,6 +39,28 @@ user whose actual problem is that the service is down.
 A network, authentication or parsing failure produces `unknown`, never `up` or
 `down`; see *Configuration* below for when no request is made at all.
 
+### Who invokes the tool, and who uses the alias map
+
+The **language model invokes the tool**: from the user's question it decides
+whether `service_status` is relevant and passes a service name such as `Portale Demo`.
+It does not read or interpret the alias map. The **plugin uses the map** after
+the invocation, normalises the supplied name and resolves it in this order:
+
+1. exact normalised alias from the settings;
+2. exact normalised Uptime Kuma monitor name;
+3. containment between the requested name and monitor names.
+
+Alias matching is exact after case, whitespace, `-`, `.` and `_` normalisation;
+it is not fuzzy or partial. For example, `Portale Demo: 42` matches
+`Portale Demo`, but not `Portale Demo Test`. To accept both, configure
+`Portale Demo, Portale Demo Test: 42`. An alias may also map
+one service to several monitor ids. Once the plugin has read their current
+states from `/metrics`, it returns a bounded factual sentence to the model,
+which writes the final conversational answer.
+
+The success log shows which path was used without exposing monitor names or
+ids: `resolution: alias`, `resolution: name`, or `resolution: none`.
+
 ### Cheshire Cat prerequisite
 
 `procedural_memory_k` (`k`) is the number of tools Cheshire Cat retrieves as
@@ -213,8 +235,9 @@ Three things worth knowing before you paste one:
 - **It never reaches a log line.** On the call path the plugin logs the type of
   an exception and never its text, and never the request headers or the
   instance URL. Each configured request logs its start at `INFO`; a completed
-  request logs its resolution outcome, while a failed request remains a
-  `WARNING`. Every plugin log starts with `[uptime_kuma_connector]`. Tests
+  request logs its outcome and resolution source (`alias`, `name`, or `none`),
+  while a failed request remains a `WARNING`. Every plugin log starts with
+  `[uptime_kuma_connector]`. Tests
   assert these boundaries. This guarantee covers the credential only: monitor
   **names** do reach a `WARNING` line on purpose — see below.
 
@@ -347,6 +370,16 @@ docker compose logs --since 5m cheshire-cat-core 2>&1 |
 An `action` followed by an `intermediate_steps` entry such as
 `(('service_status', 'Portale demo'), ...)` confirms that the question selected
 the tool, passed it the service name and used its result.
+
+The plugin's success line also identifies how the service was resolved without
+exposing its monitor name or id:
+
+```text
+[uptime_kuma_connector] monitoring endpoint request succeeded (outcome: known, resolution: alias).
+```
+
+`resolution: alias` confirms the settings map was used; `name` means automatic
+name matching, and `none` means no monitor matched.
 
 ## Before this can be published
 

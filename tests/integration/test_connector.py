@@ -286,10 +286,32 @@ class TestServiceStatusBehaviour:
         assert info_lines == [
             "[uptime_kuma_connector] requesting current monitor status.",
             "[uptime_kuma_connector] monitoring endpoint request succeeded "
-            "(outcome: known).",
+            "(outcome: known, resolution: name).",
         ]
         assert not any("read-key" in line for line in info_lines)
         assert not any("kuma.example.org" in line for line in info_lines)
+
+    def test_a_known_alias_is_identified_in_the_success_log(self, monkeypatch):
+        lines = []
+        monkeypatch.setattr(
+            connector.httpx,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+        monkeypatch.setattr(connector.log, "info", lines.append)
+
+        sentence = self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "alias_map": "Accesso remoto: 17",
+            },
+            "Accesso remoto",
+        )
+
+        assert sentence == "Il servizio Accesso remoto risulta attivo."
+        assert any("outcome: known, resolution: alias" in line for line in lines)
+        assert not any("17" in line or "Accesso remoto" in line for line in lines)
 
     def test_the_tool_never_raises_when_the_http_client_does(self, monkeypatch):
         def unexpected_failure(*_args, **_kwargs):
