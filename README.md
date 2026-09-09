@@ -143,14 +143,16 @@ Everything lives in one place: **Plugins → Uptime Kuma Connector → Settings*
 the Cheshire Cat admin panel. There is no environment variable to set, no file
 to edit and no container to restart.
 
-Three fields. Two are required to reach Uptime Kuma at all; the third is
-optional and only matters when a monitor's name is not what users call it.
+Five fields. Two are required to reach Uptime Kuma, one maps aliases, and two
+bound the time and memory consumed by a response.
 
 | Field | Required | Default | What it does |
 | --- | --- | --- | --- |
 | **Uptime Kuma: URL istanza** | yes | empty | The base URL of the instance, without `/metrics`. Empty disables the connector |
 | **Uptime Kuma: API key** | yes | empty | A read-only key from the Uptime Kuma dashboard. Empty disables the connector |
 | **Uptime Kuma: mappa alias** | no | empty | Maps what users say to monitor ids, one entry per line |
+| **Uptime Kuma: risposta massima (KiB)** | no | 1024 | Rejects `/metrics` responses above this size; accepted range 64–10240 KiB |
+| **Uptime Kuma: timeout (secondi)** | no | 2 | Maximum duration of the complete request; accepted range 1–10 seconds |
 
 **The connector is enabled only when the URL and the key are both filled in.**
 One function decides it, and every path goes through that function — so there is
@@ -273,11 +275,18 @@ an alias. A query shorter than three characters only matches a monitor name by
 whole word, never by substring, so a single letter cannot accidentally match
 every name that happens to contain it.
 
+### Network safety limits
+
+The response ceiling is expressed in KiB and defaults to 1024 (one MiB). The
+timeout defaults to two seconds and applies to the complete request, not only to
+each socket operation. Exceeding either limit returns the explicit `unknown`
+sentence and logs only the failure type; the URL, response body and credentials
+remain absent from logs.
+
 ### What is deliberately not configurable
 
 | Absent | Why |
 | --- | --- |
-| Request timeout | Fixed at 2 seconds. The call sits inside a conversation with a user waiting, which is a property of the situation and not a preference |
 | Cache or refresh interval | There is none. The status is read at the moment the question arrives, because a forty-second-old status is indistinguishable from a current one |
 | A general on/off switch | An empty URL disables the connector, and Cheshire Cat already has one — deactivating the plugin. A second switch could disagree with the first |
 

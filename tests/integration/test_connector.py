@@ -22,7 +22,10 @@ The cases that belong here are:
 """
 
 import sys
+import time
+from importlib import import_module
 from pathlib import Path
+from threading import Event
 
 import pytest
 from pydantic import ValidationError
@@ -55,14 +58,17 @@ class TestPluginLoads:
             settings_module.UptimeKumaConnectorSettings
         )
 
-    def test_the_form_carries_exactly_the_three_specified_fields(self):
-        # Three, and the absences are decisions: no timeout, no cache, no
-        # general switch. Asserting the exact set rather than the presence of
-        # each is what makes adding a fourth field a deliberate act instead of
-        # an accident.
+    def test_the_form_carries_exactly_the_five_specified_fields(self):
+        # The exact set makes every persisted option a deliberate decision.
         schema = settings_module.UptimeKumaConnectorSettings.model_json_schema()
 
-        assert set(schema["properties"]) == {"base_url", "api_key", "alias_map"}
+        assert set(schema["properties"]) == {
+            "base_url",
+            "api_key",
+            "alias_map",
+            "maximum_response_size_kib",
+            "request_timeout_seconds",
+        }
 
     def test_every_field_has_a_short_italian_label(self):
         # Beyond roughly 200 characters for title plus description the settings
@@ -83,6 +89,8 @@ class TestPluginLoads:
         assert settings.base_url == ""
         assert settings.api_key == ""
         assert settings.alias_map == ""
+        assert settings.maximum_response_size_kib == 1024
+        assert settings.request_timeout_seconds == 2.0
         assert connector.is_usable(settings) is False
 
     def test_the_defaults_can_build_settings_json(self):
@@ -102,6 +110,23 @@ class TestPluginLoads:
             connector.log.info = original
 
         assert any("plugin activated" in line for line in lines)
+
+    def test_an_internal_import_error_is_not_redirected_to_top_level_modules(
+        self, tmp_path, monkeypatch
+    ):
+        package = tmp_path / "plugin_with_broken_settings"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "kuma_client.py").write_text("", encoding="utf-8")
+        (package / "settings.py").write_text(
+            'raise ImportError("failure inside local settings")\n', encoding="utf-8"
+        )
+        source = Path(connector.__file__).read_text(encoding="utf-8")
+        (package / "uptime_kuma_connector.py").write_text(source, encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        with pytest.raises(ImportError, match="failure inside local settings"):
+            import_module("plugin_with_broken_settings.uptime_kuma_connector")
 
 
 class TestToolWiring:
@@ -133,13 +158,24 @@ class TestToolWiring:
 
 
 class FakeHttpResponse:
-    def __init__(self, text, failure=None):
-        self.text = text
+    def __init__(self, text, failure=None, headers=None, chunks=None):
+        self.content = text.encode("utf-8")
         self.failure = failure
+        self.headers = headers or {}
+        self.chunks = chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
 
     def raise_for_status(self):
         if self.failure is not None:
             raise self.failure
+
+    def iter_bytes(self):
+        yield from self.chunks if self.chunks is not None else (self.content,)
 
 
 class TestServiceStatusBehaviour:
@@ -155,7 +191,7 @@ class TestServiceStatusBehaviour:
 
     def test_an_unconfigured_connector_makes_no_network_call(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(connector.httpx, "get", lambda *args, **kwargs: calls.append(1))
+        monkeypatch.setattr(connector.httpx, "stream", lambda *args, **kwargs: calls.append(1))
 
         sentence = self.call({})
 
@@ -164,7 +200,7 @@ class TestServiceStatusBehaviour:
 
     def test_a_url_without_a_key_makes_no_network_call(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(connector.httpx, "get", lambda *args, **kwargs: calls.append(1))
+        monkeypatch.setattr(connector.httpx, "stream", lambda *args, **kwargs: calls.append(1))
 
         sentence = self.call({"base_url": "https://kuma.example.org"})
 
@@ -178,7 +214,7 @@ class TestServiceStatusBehaviour:
         def unreachable(*_args, **_kwargs):
             raise connector.httpx.ConnectError("connection refused")
 
-        monkeypatch.setattr(connector.httpx, "get", unreachable)
+        monkeypatch.setattr(connector.httpx, "stream", unreachable)
         monkeypatch.setattr(connector.log, "info", info_lines.append)
         monkeypatch.setattr(connector.log, "warning", warning_lines.append)
 
@@ -203,7 +239,7 @@ class TestServiceStatusBehaviour:
         )
         monkeypatch.setattr(
             connector.httpx,
-            "get",
+            "stream",
             lambda *_args, **_kwargs: FakeHttpResponse("", failure),
         )
         monkeypatch.setattr(connector.log, "warning", lines.append)
@@ -222,21 +258,28 @@ class TestServiceStatusBehaviour:
         captured = {}
         info_lines = []
 
-        def successful_get(url, **kwargs):
+        def successful_stream(method, url, **kwargs):
+            captured["method"] = method
             captured["url"] = url
             captured.update(kwargs)
             return FakeHttpResponse(self.VALID_PAYLOAD)
 
-        monkeypatch.setattr(connector.httpx, "get", successful_get)
+        monkeypatch.setattr(connector.httpx, "stream", successful_stream)
         monkeypatch.setattr(connector.log, "info", info_lines.append)
 
         sentence = self.call(
-            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "request_timeout_seconds": 3.5,
+                "maximum_response_size_kib": 256,
+            }
         )
 
         assert sentence == "Il servizio VPN risulta attivo."
+        assert captured["method"] == "GET"
         assert captured["url"] == "https://kuma.example.org/metrics"
-        assert captured["timeout"] == connector.REQUEST_TIMEOUT_SECONDS == 2.0
+        assert captured["timeout"] == 3.5
         assert captured["headers"]["Authorization"] == (
             connector.kuma_client.basic_auth_header("read-key")
         )
@@ -252,13 +295,85 @@ class TestServiceStatusBehaviour:
         def unexpected_failure(*_args, **_kwargs):
             raise RuntimeError("unexpected client failure")
 
-        monkeypatch.setattr(connector.httpx, "get", unexpected_failure)
+        monkeypatch.setattr(connector.httpx, "stream", unexpected_failure)
 
         sentence = self.call(
             {"base_url": "https://kuma.example.org", "api_key": "read-key"}
         )
 
         assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+
+    def test_an_oversized_declared_response_is_unknown(self, monkeypatch):
+        lines = []
+        monkeypatch.setattr(
+            connector.httpx,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(
+                "", headers={"content-length": str(64 * 1024 + 1)}
+            ),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+
+        sentence = self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "maximum_response_size_kib": 64,
+            }
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert any("MetricsResponseTooLarge" in line for line in lines)
+
+    def test_a_chunked_response_cannot_bypass_the_size_limit(self, monkeypatch):
+        monkeypatch.setattr(
+            connector.httpx,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(
+                "", chunks=(b"a" * (32 * 1024), b"b" * (32 * 1024 + 1))
+            ),
+        )
+
+        sentence = self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "maximum_response_size_kib": 64,
+            }
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+
+    def test_the_configured_timeout_bounds_the_complete_response(self, monkeypatch):
+        release = Event()
+        lines = []
+
+        class SlowResponse(FakeHttpResponse):
+            def iter_bytes(self):
+                release.wait(5)
+                yield self.content
+
+        monkeypatch.setattr(
+            connector.httpx,
+            "stream",
+            lambda *_args, **_kwargs: SlowResponse(self.VALID_PAYLOAD),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+
+        started = time.monotonic()
+        sentence = self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "request_timeout_seconds": 1,
+            }
+        )
+        elapsed = time.monotonic() - started
+        release.set()
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert elapsed < 1.5
+        assert any("MetricsRequestDeadlineExceeded" in line for line in lines)
 
     def test_not_monitored_logs_at_most_three_close_names(self, monkeypatch):
         payload = "\n".join(
@@ -269,7 +384,7 @@ class TestServiceStatusBehaviour:
         )
         lines = []
         monkeypatch.setattr(
-            connector.httpx, "get", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+            connector.httpx, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
         )
         monkeypatch.setattr(connector.log, "warning", lines.append)
         connector._reported_configuration = None
@@ -293,7 +408,7 @@ class TestServiceStatusBehaviour:
         )
         lines = []
         monkeypatch.setattr(
-            connector.httpx, "get", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+            connector.httpx, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
         )
         monkeypatch.setattr(connector.log, "warning", lines.append)
         connector._reported_configuration = None
@@ -374,6 +489,40 @@ class TestTheInstanceUrlValidator:
     def test_query_parameters_are_refused(self):
         with pytest.raises(ValidationError):
             self.build("https://kuma.example.org?token=x")
+
+
+class TestNetworkSafetyLimits:
+    def test_boundary_values_are_accepted(self):
+        lower = settings_module.UptimeKumaConnectorSettings(
+            maximum_response_size_kib=64,
+            request_timeout_seconds=1,
+        )
+        upper = settings_module.UptimeKumaConnectorSettings(
+            maximum_response_size_kib=10240,
+            request_timeout_seconds=10,
+        )
+
+        assert (lower.maximum_response_size_kib, lower.request_timeout_seconds) == (
+            64,
+            1,
+        )
+        assert (upper.maximum_response_size_kib, upper.request_timeout_seconds) == (
+            10240,
+            10,
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (
+            ("maximum_response_size_kib", 63),
+            ("maximum_response_size_kib", 10241),
+            ("request_timeout_seconds", 0.9),
+            ("request_timeout_seconds", 10.1),
+        ),
+    )
+    def test_out_of_range_values_are_refused(self, field, value):
+        with pytest.raises(ValidationError):
+            settings_module.UptimeKumaConnectorSettings(**{field: value})
 
 
 class TestTheAliasMapIsNeverRefused:

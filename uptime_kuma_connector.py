@@ -3,7 +3,7 @@
 The plugin loads, validates its settings, and exposes one tool that reads the
 current status of a service. Its shape is:
 
-    settings -> is_usable() -> httpx GET /metrics (basic auth, 2 s timeout)
+    settings -> is_usable() -> bounded httpx stream of GET /metrics
              -> kuma_client.parse_monitor_metrics() -> kuma_client.find_monitor()
              -> kuma_client.describe_resolution() -> sentence for the model
 
@@ -17,22 +17,105 @@ between turns: the status is read when the question arrives.
 """
 
 from difflib import SequenceMatcher
+from queue import Queue
+from threading import Event, Thread
 
 import httpx
 from cat.log import log
 from cat.mad_hatter.decorators import plugin, tool
 
-try:
+if __package__:
     from . import kuma_client
     from .settings import SECURE_SCHEME, UptimeKumaConnectorSettings
-except ImportError:  # pragma: no cover - depends on how the module is loaded
+else:  # pragma: no cover - used by the repository's top-level test import
     import kuma_client
     from settings import SECURE_SCHEME, UptimeKumaConnectorSettings
 
-# The call sits inside the turn, in front of a waiting user. A background job
-# would allow ten seconds; here that would be ten seconds of silence in a
-# conversation.
-REQUEST_TIMEOUT_SECONDS = 2.0
+BYTES_PER_KIBIBYTE = 1024
+
+
+class MetricsResponseTooLarge(Exception):
+    """The endpoint exceeded the configured in-memory response ceiling."""
+
+
+class MetricsRequestDeadlineExceeded(Exception):
+    """The complete request did not finish within its configured deadline."""
+
+
+def _read_metrics_stream(
+    url: str,
+    authorization: str,
+    timeout_seconds: float,
+    maximum_bytes: int,
+    cancelled: Event,
+) -> str:
+    """Read one response incrementally, stopping before it exceeds its limit."""
+    with httpx.stream(
+        "GET",
+        url,
+        headers={"Authorization": authorization},
+        timeout=timeout_seconds,
+    ) as response:
+        response.raise_for_status()
+
+        declared_size = response.headers.get("content-length")
+        if declared_size is not None:
+            try:
+                if int(declared_size) > maximum_bytes:
+                    raise MetricsResponseTooLarge
+            except ValueError:
+                # A malformed header is not trusted; the measured byte limit
+                # below remains authoritative.
+                pass
+
+        payload = bytearray()
+        for chunk in response.iter_bytes():
+            if cancelled.is_set():
+                raise MetricsRequestDeadlineExceeded
+            if len(payload) + len(chunk) > maximum_bytes:
+                raise MetricsResponseTooLarge
+            payload.extend(chunk)
+
+    return payload.decode("utf-8")
+
+
+def _fetch_metrics(
+    settings: UptimeKumaConnectorSettings, authorization: str
+) -> str:
+    """Fetch `/metrics` with both a byte ceiling and a total wall-clock limit.
+
+    httpx's timeout bounds individual socket operations, not the complete
+    response. The daemon worker lets the calling conversation stop at the
+    configured total deadline as well. Cancellation is observed between chunks;
+    an in-progress socket operation remains bounded by the same httpx timeout.
+    """
+    result: Queue = Queue(maxsize=1)
+    cancelled = Event()
+
+    def fetch() -> None:
+        try:
+            payload = _read_metrics_stream(
+                kuma_client.metrics_url(settings.base_url),
+                authorization,
+                settings.request_timeout_seconds,
+                settings.maximum_response_size_kib * BYTES_PER_KIBIBYTE,
+                cancelled,
+            )
+            result.put((True, payload))
+        except Exception as failure:
+            result.put((False, failure))
+
+    worker = Thread(target=fetch, daemon=True, name="uptime-kuma-metrics")
+    worker.start()
+    worker.join(settings.request_timeout_seconds)
+    if worker.is_alive():
+        cancelled.set()
+        raise MetricsRequestDeadlineExceeded
+
+    succeeded, value = result.get_nowait()
+    if not succeeded:
+        raise value
+    return value
 
 
 def resolve_api_key(settings: UptimeKumaConnectorSettings) -> str:
@@ -183,7 +266,13 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
     # `bool(...)` and not the key itself: this module-level variable outlives
     # the turn, and a credential kept in it is a credential in every memory dump
     # and every debugger session for as long as the plugin stays loaded.
-    signature = (settings.base_url, bool(settings.api_key), settings.alias_map)
+    signature = (
+        settings.base_url,
+        bool(settings.api_key),
+        settings.alias_map,
+        settings.maximum_response_size_kib,
+        settings.request_timeout_seconds,
+    )
     if signature == _reported_configuration:
         return
     _reported_configuration = signature
@@ -232,13 +321,10 @@ def service_status(service_name: str, cat) -> str:
         api_key = resolve_api_key(settings)
         aliases = alias_map(settings)
         log.info("[uptime_kuma_connector] requesting current monitor status.")
-        response = httpx.get(
-            kuma_client.metrics_url(settings.base_url),
-            headers={"Authorization": kuma_client.basic_auth_header(api_key)},
-            timeout=REQUEST_TIMEOUT_SECONDS,
+        payload = _fetch_metrics(
+            settings,
+            kuma_client.basic_auth_header(api_key),
         )
-        response.raise_for_status()
-        payload = response.text
         names, statuses = kuma_client.parse_monitor_metrics(payload)
         resolution = kuma_client.find_monitor(names, service_name, aliases)
         if names:

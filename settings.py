@@ -1,6 +1,6 @@
 """Plugin settings, exposed in the Cheshire Cat admin panel.
 
-Three fields, and the absences matter as much as the fields.
+Five fields, and the absences matter as much as the fields.
 
 - **The API key is a panel field, and the panel is the only place it lives.**
   Decided on 2026-09-08, reversing the earlier environment-only rule: everything
@@ -15,8 +15,9 @@ Three fields, and the absences matter as much as the fields.
   can read the plugin folder can read the key, and that key grants read access
   to the whole monitoring system — so it must be a **read-only** key, and
   rotating it is the only remedy once the folder has been copied.
-- **No timeout field.** Two seconds is a property of sitting inside a
-  conversation in front of a waiting user, not a preference to tune.
+- **The timeout and response-size ceiling are configurable safety limits.**
+  Their defaults preserve the original two-second behaviour and cap `/metrics`
+  at one MiB; validators keep both within deliberately narrow ranges.
 - **No cache field.** The status is read in real time; there is no state kept
   between turns.
 - **No general on/off switch.** An empty instance URL disables the connector,
@@ -72,10 +73,9 @@ TEXT_AREA = {"extra": {"type": "TextArea"}}
 class UptimeKumaConnectorSettings(BaseModel):
     """The form the admin panel builds, and the shipped defaults.
 
-    Both defaults are empty, which is a working "not configured" state: with no
-    instance URL the connector is disabled and no network call is attempted.
-    That is the correct shipped default for a plugin that talks to somebody
-    else's monitoring system.
+    The URL and key defaults are empty, which is a working "not configured"
+    state: with no instance URL the connector is disabled and no network call
+    is attempted. The network limits have conservative usable defaults.
     """
 
     base_url: str = Field(
@@ -111,6 +111,22 @@ class UptimeKumaConnectorSettings(BaseModel):
         title="Uptime Kuma: mappa alias",
         description="Opzionale, una voce per riga: nome, altro nome: id, id (max 10 id per alias)",
         json_schema_extra=TEXT_AREA,
+    )
+
+    maximum_response_size_kib: int = Field(
+        default=1024,
+        ge=64,
+        le=10240,
+        title="Uptime Kuma: risposta massima (KiB)",
+        description="Limite di sicurezza per /metrics, da 64 a 10240 KiB.",
+    )
+
+    request_timeout_seconds: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=10.0,
+        title="Uptime Kuma: timeout (secondi)",
+        description="Durata massima della richiesta, da 1 a 10 secondi.",
     )
 
     @field_validator("base_url")
