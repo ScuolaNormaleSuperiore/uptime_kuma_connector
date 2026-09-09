@@ -13,9 +13,11 @@
 #   3. there are three more labels than documented: monitor_url,
 #      monitor_hostname and monitor_port, the last two often the string "null".
 #
-# All 49 monitors were up when this was captured, so **only the value 1 appears
-# here**. Whether this instance ever emits 0, 2 or 3 is still unobserved: do not
-# hand-write those lines into this file, capture them.
+# All 49 monitors were up in the first capture. A second real capture on
+# 2026-09-09, while a test service was unavailable, confirmed that this instance
+# emits value 0. Value 2 was observed transiently in an aggregate read on
+# 2026-09-09, but its full line disappeared before capture; value 3 remains
+# unobserved. Do not hand-write those lines into this file, capture them.
 
 # HELP monitor_cert_days_remaining The number of days remaining until the certificate expires
 # TYPE monitor_cert_days_remaining gauge
@@ -29,6 +31,7 @@ monitor_status{CategoriaG="",CategoriaE="",monitor_id="47",monitor_name="Portale
 monitor_status{CategoriaG="",CategoriaE="",monitor_id="48",monitor_name="Posta elettronica",monitor_type="port",monitor_url="https://servizio.example.org",monitor_hostname="servizio.example.org",monitor_port="636"} 1
 monitor_status{CategoriaF="",CategoriaE="",monitor_id="49",monitor_name="DNS interno",monitor_type="postgres",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
 monitor_status{CategoriaF="",CategoriaC="",monitor_id="50",monitor_name="Archivio documentale",monitor_type="oracledb",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 1
+monitor_status{CategoriaCaptured1="",monitor_id="9001",monitor_name="Servizio di test non disponibile",monitor_type="http",monitor_url="https://servizio.example.org",monitor_hostname="null",monitor_port="null"} 0
 monitor_response_time{CategoriaA="",monitor_id="1",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 1852
 monitor_response_time{CategoriaA="",monitor_id="2",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 1003
 monitor_cert_days_remaining{CategoriaA="",monitor_id="1",monitor_name="anonimizzato",monitor_type="http",monitor_url="anonimizzato",monitor_hostname="anonimizzato",monitor_port="null"} 58

@@ -151,7 +151,7 @@ class TestServiceStatusBehaviour:
 
     @staticmethod
     def call(stored, service_name="VPN"):
-        return connector.service_status.function(service_name, FakeCat(stored))
+        return connector.service_status.func(service_name, FakeCat(stored))
 
     def test_an_unconfigured_connector_makes_no_network_call(self, monkeypatch):
         calls = []
@@ -172,10 +172,15 @@ class TestServiceStatusBehaviour:
         assert sentence == connector.kuma_client.unreachable_sentence("VPN")
 
     def test_an_unreachable_instance_is_unknown(self, monkeypatch):
+        info_lines = []
+        warning_lines = []
+
         def unreachable(*_args, **_kwargs):
             raise connector.httpx.ConnectError("connection refused")
 
         monkeypatch.setattr(connector.httpx, "get", unreachable)
+        monkeypatch.setattr(connector.log, "info", info_lines.append)
+        monkeypatch.setattr(connector.log, "warning", warning_lines.append)
 
         sentence = self.call(
             {"base_url": "https://kuma.example.org", "api_key": "read-key"}
@@ -183,6 +188,10 @@ class TestServiceStatusBehaviour:
 
         assert sentence == connector.kuma_client.unreachable_sentence("VPN")
         assert "Non trarre conclusioni" in sentence
+        assert info_lines == [
+            "[uptime_kuma_connector] requesting current monitor status."
+        ]
+        assert any("ConnectError" in line for line in warning_lines)
 
     def test_http_401_is_unknown_and_the_key_is_not_logged(self, monkeypatch):
         canary = "uk1-do-not-log-this-value"
@@ -211,6 +220,7 @@ class TestServiceStatusBehaviour:
 
     def test_the_request_uses_the_metrics_url_auth_header_and_timeout(self, monkeypatch):
         captured = {}
+        info_lines = []
 
         def successful_get(url, **kwargs):
             captured["url"] = url
@@ -218,6 +228,7 @@ class TestServiceStatusBehaviour:
             return FakeHttpResponse(self.VALID_PAYLOAD)
 
         monkeypatch.setattr(connector.httpx, "get", successful_get)
+        monkeypatch.setattr(connector.log, "info", info_lines.append)
 
         sentence = self.call(
             {"base_url": "https://kuma.example.org", "api_key": "read-key"}
@@ -229,6 +240,13 @@ class TestServiceStatusBehaviour:
         assert captured["headers"]["Authorization"] == (
             connector.kuma_client.basic_auth_header("read-key")
         )
+        assert info_lines == [
+            "[uptime_kuma_connector] requesting current monitor status.",
+            "[uptime_kuma_connector] monitoring endpoint request succeeded "
+            "(outcome: known).",
+        ]
+        assert not any("read-key" in line for line in info_lines)
+        assert not any("kuma.example.org" in line for line in info_lines)
 
     def test_the_tool_never_raises_when_the_http_client_does(self, monkeypatch):
         def unexpected_failure(*_args, **_kwargs):

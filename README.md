@@ -10,11 +10,13 @@ device — the most common question at a first-level help desk, and the one the
 assistant currently has no data for. It answers with the right procedure to a
 user whose actual problem is that the service is down.
 
-> **Status: the first-version behaviour is implemented; verification is in
-> progress.** The settings, pure client and `service_status` tool are wired. The
+> **Status: the first-version behaviour is implemented and its automated suite
+> is green.** The settings, pure client and `service_status` tool are wired. The
 > adapter reads `/metrics` on demand with a two-second timeout and turns every
-> failure into an explicit unknown result. The full container suite and a live
-> end-to-end question still have to be verified.
+> failure into an explicit unknown result. All 98 tests passed in the core
+> container on 2026-09-09. Live end-to-end questions confirmed `up`, `down` and
+> `not_monitored`. Status `2` was observed transiently but not captured as a
+> fixture; status `3` remains unobserved.
 
 ## How it is meant to work
 
@@ -169,8 +171,11 @@ Three things worth knowing before you paste one:
   stays out of the repository — but it is in every backup, container snapshot
   and support copy of that folder. Rotate the key if the folder is ever copied.
 - **It never reaches a log line.** On the call path the plugin logs the type of
-  an exception and never its text, and never the request headers. A test asserts
-  it.
+  an exception and never its text, and never the request headers. Each configured
+  request logs its start at `INFO`; a completed request logs its resolution
+  outcome, while a failed request remains a `WARNING`. No URL, key, header or
+  monitor name is included. Every plugin log starts with
+  `[uptime_kuma_connector]`. Tests assert these boundaries.
 
 ### Uptime Kuma: mappa alias
 
@@ -199,6 +204,12 @@ The first line maps several ways of writing the same service to monitor `12`.
 The `Esse3` line deliberately maps one service to three monitors, so the tool
 can report the state of all its components. Comments can be used to organise a
 longer map.
+
+**One alias can group up to 10 monitor ids.** Above that the tool reports the
+service as `ambiguous` instead of naming ten-plus components in one sentence.
+An ordinary name match is capped at 5 for the same reason, at a lower number
+because an unintentional name collision is a weaker signal than an alias an
+administrator wrote on purpose.
 
 Blank lines and lines starting with `#` are ignored. The id is the number in the
 monitor's URL in Uptime Kuma, `/dashboard/<id>`; to check one, open
@@ -252,19 +263,41 @@ container:
 python run-tests.py --integration
 ```
 
-Run the full suite with `python run-tests.py`. Add `--detailed` to any command
-to list every test name. The runner reports how to start `cheshire-cat-core` if
-the container is not running.
+Run the full suite, optionally listing every test name, with:
+
+```bash
+python run-tests.py
+python run-tests.py --detailed
+```
+
+The runner reports how to start `cheshire-cat-core` if the container is not
+running.
 
 The unit tier covers parsing, aliases, resolution and all response outcomes.
 The integration tier covers settings, validators, tool wiring and adapter
 behaviour with a fake Cat and mocked HTTP. Neither tier contacts a live Uptime
 Kuma instance.
 
+## Verifying that a question invoked the tool
+
+The chatbot answer alone is not proof. After asking the question, filter the
+core logs instead of sharing their raw output, which may contain session tokens:
+
+```powershell
+docker compose logs --since 5m cheshire-cat-core 2>&1 |
+  Select-String -Pattern '"action": "service_status"|intermediate_steps=.*service_status'
+```
+
+An `action` followed by an `intermediate_steps` entry such as
+`(('service_status', 'Portale demo'), ...)` confirms that the question selected
+the tool, passed it the service name and used its result.
+
 ## Before this can be published
 
-1. Confirm the shape of `/metrics` against a real instance, and whether
-   `monitor_status` emits `2` and `3` as well as `0` and `1`.
+1. Capture a complete `/metrics` line while a monitor is pending or in
+   maintenance. Values `0` and `1` were captured on 2026-09-09; value `2` was
+   observed transiently but its line was not captured, and value `3` remains
+   unobserved.
 2. Verify the [procedural-memory prerequisite](#cheshire-cat-prerequisite) on
    the target instance.
 3. Choose a licence and add the file — the registry requires open source.

@@ -4,7 +4,13 @@ The plugin loads, validates its settings, and exposes one tool that reads the
 current status of a service. Its shape is:
 
     settings -> is_usable() -> httpx GET /metrics (basic auth, 2 s timeout)
-             -> kuma_client.describe_status() -> sentence for the model
+             -> kuma_client.parse_monitor_metrics() -> kuma_client.find_monitor()
+             -> kuma_client.describe_resolution() -> sentence for the model
+
+The resolution from `find_monitor()` is kept around rather than discarded: the
+adapter's own diagnostic logging needs the same one, and re-parsing `/metrics`
+and re-resolving the request a second time just to log would cost that work
+twice on every call.
 
 Every failure is caught and becomes the `unknown` outcome. No state is kept
 between turns: the status is read when the question arrives.
@@ -60,7 +66,7 @@ def load_settings(cat) -> UptimeKumaConnectorSettings:
         stored = cat.mad_hatter.get_plugin().load_settings()
     except Exception as failure:  # the core, the file, or the plugin lookup
         log.warning(
-            "[uptime-kuma] could not read the stored settings "
+            "[uptime_kuma_connector] could not read the stored settings "
             f"({type(failure).__name__}); the connector stays disabled."
         )
         return UptimeKumaConnectorSettings()
@@ -73,7 +79,7 @@ def load_settings(cat) -> UptimeKumaConnectorSettings:
         # on read as it would on save. Disabling the connector is the safe
         # answer; raising here would break a conversation over a typo.
         log.warning(
-            "[uptime-kuma] the stored settings are not valid "
+            "[uptime_kuma_connector] the stored settings are not valid "
             f"({type(failure).__name__}); the connector stays disabled."
         )
         return UptimeKumaConnectorSettings()
@@ -120,17 +126,23 @@ def _closest_monitor_names(service_name: str, names: tuple[str, ...]) -> tuple[s
     return tuple(ranked[:3])
 
 
-def _report_resolution_problems(payload: str, service_name: str, aliases: dict) -> None:
-    """Log administrator-only diagnostics without adding them to the model text."""
-    names, _statuses = kuma_client.parse_monitor_metrics(payload)
-    resolution = kuma_client.find_monitor(names, service_name, aliases)
+def _report_resolution_problems(
+    resolution: kuma_client.MonitorResolution, names: dict
+) -> None:
+    """Log administrator-only diagnostics without adding them to the model text.
 
+    Takes the `MonitorResolution` and the parsed monitor names as already
+    computed by the caller, rather than the raw payload: `service_status()`
+    needs the same resolution to build the sentence, and re-parsing `/metrics`
+    and re-resolving the request here just to log would cost that work twice
+    on every single call.
+    """
     if resolution.missing_alias_ids:
         missing = ", ".join(
             str(monitor_id) for monitor_id in resolution.missing_alias_ids
         )
         log.warning(
-            "[uptime-kuma] alias "
+            "[uptime_kuma_connector] alias "
             f"'{resolution.requested_name}' refers to monitor ids absent from "
             f"/metrics: {missing}."
         )
@@ -142,7 +154,7 @@ def _report_resolution_problems(payload: str, service_name: str, aliases: dict) 
         )
         suffix = f" Closest monitor names: {', '.join(closest)}." if closest else ""
         log.warning(
-            "[uptime-kuma] no monitor matches "
+            "[uptime_kuma_connector] no monitor matches "
             f"'{resolution.requested_name}'.{suffix}"
         )
 
@@ -185,7 +197,7 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         # anything that sees the traffic. Negligible on a container network,
         # real across a campus LAN.
         log.warning(
-            "[uptime-kuma] the instance URL is not HTTPS: the API key will "
+            "[uptime_kuma_connector] the instance URL is not HTTPS: the API key will "
             "travel in clear text on every call. Acceptable only if that "
             "traffic never leaves a private network."
         )
@@ -195,13 +207,13 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         # stopped. Without this line the plugin is silently disabled and looks
         # configured in the panel.
         log.warning(
-            "[uptime-kuma] the instance URL is set but the API key field is "
+            "[uptime_kuma_connector] the instance URL is set but the API key field is "
             "empty: the connector stays disabled and no call is made."
         )
 
     _aliases, problems = kuma_client.parse_alias_map(settings.alias_map)
     for problem in problems:
-        log.warning(f"[uptime-kuma] alias map, {problem}")
+        log.warning(f"[uptime_kuma_connector] alias map, {problem}")
 
 
 @tool(return_direct=False)
@@ -219,6 +231,7 @@ def service_status(service_name: str, cat) -> str:
 
         api_key = resolve_api_key(settings)
         aliases = alias_map(settings)
+        log.info("[uptime_kuma_connector] requesting current monitor status.")
         response = httpx.get(
             kuma_client.metrics_url(settings.base_url),
             headers={"Authorization": kuma_client.basic_auth_header(api_key)},
@@ -226,17 +239,25 @@ def service_status(service_name: str, cat) -> str:
         )
         response.raise_for_status()
         payload = response.text
-        _outcome, sentence = kuma_client.describe_status(
-            payload, service_name, aliases
+        names, statuses = kuma_client.parse_monitor_metrics(payload)
+        resolution = kuma_client.find_monitor(names, service_name, aliases)
+        if names:
+            outcome, sentence = kuma_client.describe_resolution(resolution, statuses)
+        else:
+            outcome = kuma_client.OUTCOME_UNKNOWN
+            sentence = kuma_client.unreachable_sentence(service_name)
+        log.info(
+            "[uptime_kuma_connector] monitoring endpoint request succeeded "
+            f"(outcome: {outcome})."
         )
-        _report_resolution_problems(payload, service_name, aliases)
+        _report_resolution_problems(resolution, names)
         return sentence
     except Exception as failure:
         # The exception text may contain the URL, the Authorization header, or
         # an echoed credential. Its type gives operations enough to diagnose a
         # failure without taking that risk.
         log.warning(
-            "[uptime-kuma] could not read the monitoring endpoint "
+            "[uptime_kuma_connector] could not read the monitoring endpoint "
             f"({type(failure).__name__}); the status is unknown."
         )
         return kuma_client.unreachable_sentence(service_name)
@@ -257,6 +278,6 @@ def activated(plugin):
     first turn that reads it instead.
     """
     log.info(
-        "[uptime-kuma] plugin activated. The service_status tool reads "
+        "[uptime_kuma_connector] plugin activated. The service_status tool reads "
         "Uptime Kuma on demand; no flow hook or cache is used."
     )

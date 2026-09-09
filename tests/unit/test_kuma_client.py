@@ -143,6 +143,20 @@ class TestParseAliasMap:
         assert aliases == {"esse3": (14, 15, 16)}
         assert problems == ()
 
+    def test_repeated_ids_on_one_line_collapse_to_a_single_match(self):
+        # A copy-paste duplicate ("VPN: 17, 17, 17") must not become a
+        # duplicated clause in the sentence, or trip the ambiguous-match
+        # ceiling for what is really one monitor.
+        aliases, problems = kuma_client.parse_alias_map("VPN: 17, 17, 17")
+
+        assert aliases == {"vpn": (17,)}
+        assert problems == ()
+
+    def test_repeated_ids_keep_the_order_first_seen(self):
+        aliases, _ = kuma_client.parse_alias_map("Esse3: 14, 15, 14, 16, 15")
+
+        assert aliases == {"esse3": (14, 15, 16)}
+
     def test_blank_lines_and_comments_are_ignored(self):
         aliases, problems = kuma_client.parse_alias_map(
             "\n# la mappa dei servizi\n\nVPN: 17\n\n"
@@ -233,7 +247,7 @@ class TestParseMonitorMetrics:
 
     FIXTURE = Path(__file__).parent / "fixtures" / "metrics_sample.txt"
 
-    def test_captured_metrics_provide_all_eight_monitors(self):
+    def test_captured_metrics_provide_all_nine_monitors(self):
         payload = self.FIXTURE.read_text(encoding="utf-8")
 
         names, statuses = kuma_client.parse_monitor_metrics(payload)
@@ -247,8 +261,12 @@ class TestParseMonitorMetrics:
             48: "Posta elettronica",
             49: "DNS interno",
             50: "Archivio documentale",
+            9001: "Servizio di test non disponibile",
         }
-        assert statuses == {monitor_id: 1 for monitor_id in names}
+        assert statuses == {
+            **{monitor_id: 1 for monitor_id in names if monitor_id != 9001},
+            9001: kuma_client.STATUS_DOWN,
+        }
 
     def test_noise_metric_families_are_ignored(self):
         payload = (
@@ -303,6 +321,23 @@ class TestFindMonitor:
 
         assert resolution.matches == ((13, "U-GOV - Autenticazione Cineca"),)
 
+    def test_a_one_character_query_does_not_match_unrelated_monitors(self):
+        # A single letter is a substring of almost any name; without a minimum
+        # length this would report three unrelated services as matches.
+        resolution = kuma_client.find_monitor(
+            {1: "Anagrafica", 2: "Archivio", 3: "API Gateway"}, "A"
+        )
+
+        assert resolution.matches == ()
+
+    def test_a_short_query_still_matches_a_whole_word_in_the_name(self):
+        # The length guard applies to plain substring containment only: a
+        # short query that is a whole word of the name still matches through
+        # the word-set fallback, so a legitimate short acronym is unaffected.
+        resolution = kuma_client.find_monitor({4: "Portale PA"}, "PA")
+
+        assert resolution.matches == ((4, "Portale PA"),)
+
     def test_an_explicit_alias_wins_over_name_matching(self):
         resolution = kuma_client.find_monitor(
             self.NAMES,
@@ -355,12 +390,41 @@ class TestFindMonitor:
         assert resolution.requested_name == alias
         assert resolution.matches == ((17, "VPN - GlobalProtect"),)
 
+    def test_control_characters_are_stripped_from_the_requested_name(self):
+        # `requested_name` reaches both the sentence for the model and, in the
+        # adapter, a log.warning() call. A newline here must not be able to
+        # forge what looks like a second, unrelated log line.
+        resolution = kuma_client.find_monitor(
+            self.NAMES, "VPN\n[uptime-kuma] fake log line"
+        )
+
+        assert "\n" not in resolution.requested_name
+        assert resolution.requested_name == "VPN [uptime-kuma] fake log line"
+
 
 class TestMonitoredServiceNames:
     def test_names_keep_the_metric_order_and_exclude_ids(self):
         assert kuma_client.monitored_service_names(
             {17: "VPN - GlobalProtect", 14: "Esse3 - Web"}
         ) == ("VPN - GlobalProtect", "Esse3 - Web")
+
+
+class TestDescribeResolution:
+    """`describe_status()` is a thin wrapper around this function: the adapter
+    calls it directly, with a `MonitorResolution` it already computed, so it
+    does not have to parse `/metrics` and resolve the request a second time
+    just to log administrator diagnostics."""
+
+    def test_matches_describe_status_for_the_same_input(self):
+        payload = (
+            'monitor_status{monitor_id="17",monitor_name="VPN - GlobalProtect"} 1'
+        )
+        names, statuses = kuma_client.parse_monitor_metrics(payload)
+        resolution = kuma_client.find_monitor(names, "VPN")
+
+        assert kuma_client.describe_resolution(resolution, statuses) == (
+            kuma_client.describe_status(payload, "VPN")
+        )
 
 
 class TestDescribeStatus:
@@ -439,6 +503,41 @@ class TestDescribeStatus:
             "Portale corrisponde a troppi controlli per identificare un servizio. "
             "Chiedi all'utente quale servizio intende."
         )
+
+    def test_an_alias_grouping_more_than_five_monitors_is_not_ambiguous(self):
+        # An alias is an explicit administrator decision, not a guess: grouping
+        # the components of one composite service is intended even above five
+        # of them, so it must not collapse into `ambiguous` the way an
+        # accidental name/containment match with too many results does.
+        payload = self.payload(
+            *(
+                (monitor_id, f"Componente {monitor_id}", kuma_client.STATUS_UP)
+                for monitor_id in range(1, 8)
+            )
+        )
+
+        outcome, sentence = kuma_client.describe_status(
+            payload, "Piattaforma unica", {"piattaforma unica": tuple(range(1, 8))}
+        )
+
+        assert outcome == kuma_client.OUTCOME_KNOWN
+        assert sentence.startswith("Per Piattaforma unica risultano più controlli:")
+
+    def test_an_alias_grouping_too_many_monitors_is_still_ambiguous(self):
+        # The alias ceiling is higher, not absent: past MAXIMUM_ALIAS_MATCHES
+        # the sentence would still carry too many names into the prompt.
+        payload = self.payload(
+            *(
+                (monitor_id, f"Componente {monitor_id}", kuma_client.STATUS_UP)
+                for monitor_id in range(1, 12)
+            )
+        )
+
+        outcome, _sentence = kuma_client.describe_status(
+            payload, "Piattaforma unica", {"piattaforma unica": tuple(range(1, 12))}
+        )
+
+        assert outcome == kuma_client.OUTCOME_AMBIGUOUS
 
     def test_not_monitored_never_lists_other_services_or_reassures(self):
         outcome, sentence = kuma_client.describe_status(

@@ -37,11 +37,32 @@ OUTCOME_UNKNOWN = "unknown"
 # the outcome is `ambiguous` rather than a sentence carrying dozens of names
 # into the prompt. A project value, to revisit against a real instance.
 MAXIMUM_REPORTED_MATCHES = 5
+
+# An alias is an explicit administrator decision, not a guess, so it gets its
+# own — higher — ceiling instead of sharing the one above: grouping the
+# components of one composite service under an alias is intended, and must not
+# turn into `ambiguous` just because there happen to be more than five of them.
+MAXIMUM_ALIAS_MATCHES = 10
+
 MAXIMUM_SERVICE_NAME_LENGTH = 80
+
+# Below this many characters, plain substring containment is skipped: a one-
+# or two-character normalised query is a substring of almost any name (e.g.
+# "a" inside "archivio"), matching monitors the query does not identify at
+# all. A whole-word match — the fallback below — still goes through regardless
+# of length, so a short query that is genuinely one whole word of a monitor
+# name (an acronym such as "PA") is unaffected.
+MINIMUM_CONTAINMENT_LENGTH = 3
 
 # Removed before comparing names, so "UGOV" finds "U-GOV - Autenticazione" on
 # its own and a whole class of aliases never has to be written by hand.
 _INSIGNIFICANT_CHARACTERS = str.maketrans("", "", "-._")
+
+# This text comes from the model and reaches both a sentence for the user and
+# `log.warning()` calls in the adapter, verbatim. Stripped rather than merely
+# truncated, so a newline in a crafted service name cannot forge what looks
+# like a second, unrelated log line.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 # Prometheus label names are identifiers and label values may escape a quote,
 # backslash, or newline. Parsing labels separately avoids coupling the monitor
@@ -105,7 +126,9 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
 
     Several ids for one alias is intended, not tolerated: it is how an
     administrator groups the components of a service explicitly, without
-    depending on how they were named. It resolves to a multiple match.
+    depending on how they were named. It resolves to a multiple match. A
+    **repeated** id on the same line collapses to one, silently: a copy-paste
+    duplicate is not a second component to report twice.
 
     A conflicting alias keeps the **first** definition, and the later one is
     reported: silently overriding would make the order of the lines a hidden
@@ -156,6 +179,12 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
         if not monitor_ids:
             problems.append(f"line {number}: no monitor id after the ':'")
             continue
+
+        # Repeated ids on one line collapse to a single match, in the order
+        # first seen: a copy-paste duplicate must not turn into a duplicated
+        # clause in the sentence, or trip the ambiguous-match ceiling for what
+        # is really one monitor.
+        monitor_ids = list(dict.fromkeys(monitor_ids))
 
         for name in names:
             existing = aliases.get(name)
@@ -295,7 +324,8 @@ def find_monitor(
     response sentence. Resolution order is an explicit alias, an exact name,
     then containment in either direction, including the same normalised words
     in a different order. Every match is returned: the caller reports up to
-    five and produces the `ambiguous` outcome above that limit.
+    `MAXIMUM_REPORTED_MATCHES` and produces the `ambiguous` outcome above that
+    limit — `MAXIMUM_ALIAS_MATCHES` instead, when the match came from an alias.
     """
     requested_name = _truncate_service_name(wanted)
     normalised_wanted = normalise_name(requested_name)
@@ -333,8 +363,18 @@ def find_monitor(
 
 
 def _names_contain_each_other(left: str, right: str) -> bool:
-    """Match normalised names by phrase containment or by their word sets."""
-    if left in right or right in left:
+    """Match normalised names by phrase containment or by their word sets.
+
+    Plain substring containment requires both sides to be at least
+    `MINIMUM_CONTAINMENT_LENGTH` characters — otherwise a short query would
+    match by coincidence inside unrelated names, such as a monitor whose name
+    happens to share one common short syllable with it.
+    """
+    if (
+        len(left) >= MINIMUM_CONTAINMENT_LENGTH
+        and len(right) >= MINIMUM_CONTAINMENT_LENGTH
+        and (left in right or right in left)
+    ):
         return True
     return set(left.split()).issubset(right.split()) or set(right.split()).issubset(
         left.split()
@@ -342,8 +382,16 @@ def _names_contain_each_other(left: str, right: str) -> bool:
 
 
 def _truncate_service_name(value: str) -> str:
-    """Bound text that may later be included in a sentence for the model."""
-    return str(value or "")[:MAXIMUM_SERVICE_NAME_LENGTH]
+    """Bound text that may later be included in a sentence, or a log line.
+
+    Control characters are replaced with a space before truncating: this text
+    is untrusted (it comes from the model) and this is the one place every
+    caller — the sentence builder and the adapter's diagnostic logging alike —
+    goes through, so it is the one place a newline can be stopped from forging
+    a second, unrelated log line.
+    """
+    text = _CONTROL_CHARACTERS.sub(" ", str(value or ""))
+    return text[:MAXIMUM_SERVICE_NAME_LENGTH]
 
 
 def monitored_service_names(names: Mapping[int, str]) -> Sequence[str]:
@@ -356,24 +404,23 @@ def monitored_service_names(names: Mapping[int, str]) -> Sequence[str]:
     return tuple(names.values())
 
 
-def describe_status(
-    payload: str,
-    service_name: str,
-    explicit_ids: Mapping[str, tuple[int, ...]] | None = None,
+def describe_resolution(
+    resolution: MonitorResolution, statuses: Mapping[int, int]
 ) -> tuple[str, str]:
-    """Turn a `/metrics` response into one sentence for the model.
+    """Turn an already-resolved match into one sentence for the model.
+
+    `describe_status()` below calls this after parsing `/metrics` and
+    resolving the request itself, and is the function to use when both steps
+    still have to happen. This one exists for a caller that already did
+    them — the adapter, which needs the same `MonitorResolution` again to log
+    administrator diagnostics — so it is not forced to parse the payload and
+    resolve the request a second time just to get the sentence.
 
     Returns `(outcome, sentence)`, where the outcome is one of the four
-    constants above and the sentence is what reaches the model. An unparseable
-    payload, a broken alias, or an unrecognised status is `unknown`: none may
-    be misreported as a working service.
+    constants above and the sentence is what reaches the model. A broken alias
+    or an unrecognised status is `unknown`: neither may be misreported as a
+    working service.
     """
-    requested_name = _truncate_service_name(service_name)
-    names, statuses = parse_monitor_metrics(payload)
-    if not names:
-        return OUTCOME_UNKNOWN, unreachable_sentence(requested_name)
-
-    resolution = find_monitor(names, requested_name, explicit_ids)
     if resolution.used_alias and not resolution.matches:
         return OUTCOME_UNKNOWN, unreachable_sentence(resolution.requested_name)
 
@@ -385,7 +432,8 @@ def describe_status(
             "sul suo stato: non concluderne che il servizio funzioni.",
         )
 
-    if len(resolution.matches) > MAXIMUM_REPORTED_MATCHES:
+    match_limit = MAXIMUM_ALIAS_MATCHES if resolution.used_alias else MAXIMUM_REPORTED_MATCHES
+    if len(resolution.matches) > match_limit:
         return (
             OUTCOME_AMBIGUOUS,
             f"{resolution.requested_name} corrisponde a troppi controlli per "
@@ -408,6 +456,26 @@ def describe_status(
         OUTCOME_KNOWN,
         f"Per {resolution.requested_name} risultano più controlli: {reported}.",
     )
+
+
+def describe_status(
+    payload: str,
+    service_name: str,
+    explicit_ids: Mapping[str, tuple[int, ...]] | None = None,
+) -> tuple[str, str]:
+    """Parse `/metrics`, resolve the request, and turn it into one sentence.
+
+    Returns `(outcome, sentence)`. Convenience wrapper around
+    `parse_monitor_metrics()`, `find_monitor()` and `describe_resolution()` for
+    a caller — tests, or any future one-shot caller — that has no reason to
+    keep the intermediate `names`/`statuses`/`MonitorResolution` around.
+    """
+    names, statuses = parse_monitor_metrics(payload)
+    if not names:
+        return OUTCOME_UNKNOWN, unreachable_sentence(service_name)
+
+    resolution = find_monitor(names, service_name, explicit_ids)
+    return describe_resolution(resolution, statuses)
 
 
 def _status_clause(status: int | None) -> str | None:

@@ -109,7 +109,7 @@ class UptimeKumaConnectorSettings(BaseModel):
     alias_map: str = Field(
         default="",
         title="Uptime Kuma: mappa alias",
-        description="Opzionale, una voce per riga: nome, altro nome: id, id",
+        description="Opzionale, una voce per riga: nome, altro nome: id, id (max 10 id per alias)",
         json_schema_extra=TEXT_AREA,
     )
 
