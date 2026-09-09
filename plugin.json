@@ -1,6 +1,6 @@
 {
     "name": "Uptime Kuma Connector",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "Lets the assistant answer whether an ICT service is currently up, reading monitor state from an Uptime Kuma instance on demand. Read-only: it writes nothing back.",
     "author_name": "Servizi Informativi SNS",
     "author_url": "https://ict.sns.it",

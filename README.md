@@ -97,6 +97,7 @@ The invariant, in four words: **never invent a state.**
 | `uptime_kuma_connector.py` | The Cheshire Cat adapter: settings, HTTP, the tool | Yes |
 | `settings.py` | The admin settings model | Yes |
 | `run-tests.py` | Test runner for local unit tests and container integration tests | No |
+| `package-plugin.py` | Builds the release zip from an explicit runtime file list | No |
 | `tests/unit/` | Pure logic. Plain `pytest`, no Cheshire Cat | No |
 | `tests/integration/` | Adapter wiring, against the core as an interpreter | Yes |
 
@@ -294,12 +295,24 @@ the tool, passed it the service name and used its result.
 
 ## Before this can be published
 
-1. Capture a complete `/metrics` line while a monitor is pending or in
-   maintenance. Values `0` and `1` were captured on 2026-09-09; value `2` was
-   observed transiently but its line was not captured, and value `3` remains
-   unobserved.
-2. Verify the [procedural-memory prerequisite](#cheshire-cat-prerequisite) on
-   the target instance.
-3. Choose a licence and add the file — the registry requires open source.
-4. Choose and verify the release version, build the package, and publish the
+Two of the four checks below closed as documented limitations rather than
+completed captures — recorded here plainly rather than left open-ended, per
+`ISSUES_RESOLVED.md`.
+
+1. ~~Capture a complete `/metrics` line while a monitor is pending or in
+   maintenance.~~ Closed 2026-09-09: `0` and `1` are captured and
+   fixture-backed. `2` was only ever observed transiently, without a complete
+   line to capture; `3` is **not verifiable on this instance at all**. Revisit
+   only if a different instance becomes available.
+2. ~~Verify the [procedural-memory prerequisite](#cheshire-cat-prerequisite) on
+   the target instance.~~ Checked 2026-09-09: `k = 3` on both the local and
+   the production deployment.
+3. ~~Choose a licence and add the file — the registry requires open source.~~
+   Done: [GNU GPLv3](LICENSE).
+4. Choose and verify the release version, run `python package-plugin.py` to
+   build `dist/uptime_kuma_connector-<version>.zip`, and publish the
    repository so the registry thumbnail resolves.
+
+## License
+
+[GNU General Public License v3.0](LICENSE).

@@ -26,8 +26,8 @@ DEV/
 # it from the defaults in settings.py the first time the plugin is activated.
 #
 # It matters more here than in an ordinary plugin: this is where the Uptime Kuma
-# instance URL, the status page slug and — if the admin field is used instead of
-# the environment variable — the push token end up.
+# instance URL, API key and alias map end up. The API key is stored in clear text
+# and must never enter version control or a release package.
 #
 # Anchored to the repository root, so a settings.json elsewhere stays visible.
 /settings.json
