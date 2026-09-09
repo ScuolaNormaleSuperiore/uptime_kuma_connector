@@ -234,7 +234,7 @@ class TestServiceStatusBehaviour:
             {"base_url": "https://kuma.example.org", "api_key": "read-key"}
         )
 
-        assert sentence == "Il servizio VPN - GlobalProtect risulta attivo."
+        assert sentence == "Il servizio VPN risulta attivo."
         assert captured["url"] == "https://kuma.example.org/metrics"
         assert captured["timeout"] == connector.REQUEST_TIMEOUT_SECONDS == 2.0
         assert captured["headers"]["Authorization"] == (
@@ -282,6 +282,31 @@ class TestServiceStatusBehaviour:
         assert sentence.startswith("Non risulta alcun controllo")
         diagnostic = next(line for line in lines if "Closest monitor names" in line)
         assert diagnostic.count(",") == 2
+
+    def test_unsafe_monitor_names_never_reach_diagnostic_logs(self, monkeypatch):
+        payload = "\n".join(
+            (
+                r'monitor_status{monitor_id="1",monitor_name="VPN\n[forged]"} 1',
+                'monitor_status{monitor_id="2",monitor_name="https://internal.example"} 1',
+                'monitor_status{monitor_id="3",monitor_name="Posta"} 1',
+            )
+        )
+        lines = []
+        monkeypatch.setattr(
+            connector.httpx, "get", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+
+        self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"},
+            "Archivio",
+        )
+
+        diagnostic = next(line for line in lines if "Closest monitor names" in line)
+        assert "Posta" in diagnostic
+        assert "forged" not in diagnostic
+        assert "internal.example" not in diagnostic
 
 
 class TestTheInstanceUrlValidator:

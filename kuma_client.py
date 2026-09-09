@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -46,6 +47,12 @@ MAXIMUM_ALIAS_MATCHES = 10
 
 MAXIMUM_SERVICE_NAME_LENGTH = 80
 
+# Monitor names come from an external HTTP response. Keep a separate, slightly
+# larger bound from the model-supplied service name: valid descriptive names
+# remain usable for matching, while an attacker cannot carry an arbitrary
+# amount of text into diagnostics.
+MAXIMUM_MONITOR_NAME_LENGTH = 160
+
 # Below this many characters, plain substring containment is skipped: a one-
 # or two-character normalised query is a substring of almost any name (e.g.
 # "a" inside "archivio"), matching monitors the query does not identify at
@@ -63,6 +70,11 @@ _INSIGNIFICANT_CHARACTERS = str.maketrans("", "", "-._")
 # truncated, so a newline in a crafted service name cannot forge what looks
 # like a second, unrelated log line.
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+# A monitor name is never expected to be a URL. Schemes are matched generally
+# rather than enumerating http/https so uncommon URL forms cannot bypass the
+# boundary check.
+_URL_IN_MONITOR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|\bwww\.", re.I)
 
 # Prometheus label names are identifiers and label values may escape a quote,
 # backslash, or newline. Parsing labels separately avoids coupling the monitor
@@ -307,10 +319,32 @@ def parse_monitor_metrics(payload: str) -> tuple[dict[int, str], dict[int, int]]
         except (KeyError, TypeError, ValueError):
             continue
 
+        if not _is_safe_monitor_name(monitor_name):
+            continue
+
         names[monitor_id] = monitor_name
         statuses[monitor_id] = status
 
     return names, statuses
+
+
+def _is_safe_monitor_name(value: str) -> bool:
+    """Accept external monitor text only when it is safe to retain and log.
+
+    Unicode controls and format characters include newlines, bidirectional
+    overrides and invisible separators. Dropping the whole metric is safer
+    than silently changing its identity and accidentally matching a different
+    service. URLs and excessive text have no legitimate role in a monitor
+    name and are rejected at the same boundary.
+    """
+    if not value or len(value) > MAXIMUM_MONITOR_NAME_LENGTH:
+        return False
+    if _URL_IN_MONITOR_NAME.search(value):
+        return False
+    return not any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+        for character in value
+    )
 
 
 def find_monitor(
@@ -370,6 +404,13 @@ def _names_contain_each_other(left: str, right: str) -> bool:
     match by coincidence inside unrelated names, such as a monitor whose name
     happens to share one common short syllable with it.
     """
+    # A punctuation-only monitor name normalises to an empty string. Without
+    # this guard its empty word set is a subset of every requested name, so it
+    # would produce a false match for every query. Keep the monitor available
+    # to an explicit id-based alias; only heuristic name matching is refused.
+    if not left or not right:
+        return False
+
     if (
         len(left) >= MINIMUM_CONTAINMENT_LENGTH
         and len(right) >= MINIMUM_CONTAINMENT_LENGTH
@@ -440,18 +481,23 @@ def describe_resolution(
             "identificare un servizio. Chiedi all'utente quale servizio intende.",
         )
 
-    clauses: list[tuple[str, str]] = []
-    for monitor_id, monitor_name in resolution.matches:
+    clauses: list[str] = []
+    for monitor_id, _monitor_name in resolution.matches:
         clause = _status_clause(statuses.get(monitor_id))
         if clause is None:
             return OUTCOME_UNKNOWN, unreachable_sentence(resolution.requested_name)
-        clauses.append((monitor_name, clause))
+        clauses.append(clause)
 
     if len(clauses) == 1:
-        monitor_name, clause = clauses[0]
-        return OUTCOME_KNOWN, f"Il servizio {monitor_name} {clause}."
+        return OUTCOME_KNOWN, f"Il servizio {resolution.requested_name} {clauses[0]}."
 
-    reported = "; ".join(f"{name} {clause}" for name, clause in clauses)
+    # Monitor names are external data and never enter the model context. For a
+    # composite service, stable ordinal labels retain the per-check states
+    # without exposing a name that could contain prompt-like instructions.
+    reported = "; ".join(
+        f"controllo {number} {clause}"
+        for number, clause in enumerate(clauses, start=1)
+    )
     return (
         OUTCOME_KNOWN,
         f"Per {resolution.requested_name} risultano più controlli: {reported}.",

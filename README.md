@@ -10,13 +10,13 @@ device — the most common question at a first-level help desk, and the one the
 assistant currently has no data for. It answers with the right procedure to a
 user whose actual problem is that the service is down.
 
-> **Status: the first-version behaviour is implemented and its automated suite
-> is green.** The settings, pure client and `service_status` tool are wired. The
-> adapter reads `/metrics` on demand with a two-second timeout and turns every
-> failure into an explicit unknown result. All 98 tests passed in the core
-> container on 2026-09-09. Live end-to-end questions confirmed `up`, `down` and
-> `not_monitored`. Status `2` was observed transiently but not captured as a
-> fixture; status `3` remains unobserved.
+> **Status: the first-version behaviour is implemented, its automated suite is
+> green, and the repository is public.** The settings, pure client and
+> `service_status` tool are wired. The adapter reads `/metrics` on demand with
+> a two-second timeout and turns every failure into an explicit unknown
+> result. Live end-to-end questions confirmed `up`, `down` and
+> `not_monitored`. What remains — an interactive check of the alias map — is
+> tracked in `ISSUES_TODO.md`, not here.
 
 ## How it is meant to work
 
@@ -27,14 +27,17 @@ user whose actual problem is that the service is down.
    with the configured API key and a 2-second timeout.
 4. The pure client parses only `monitor_status`, then resolves the requested
    service by configured alias, exact name, or normalised name/token containment,
-   in that order.
+   in that order. A monitor name that normalises to an empty value is never an
+   heuristic match, but remains reachable through an explicit id-based alias.
+   Names containing unsafe Unicode controls, URLs, or more than 160 characters
+   are discarded before resolution.
 5. The client returns one of `known`, `not_monitored`, `ambiguous`, or `unknown`,
    together with an Italian sentence that never invents a state.
 6. The tool hands that fact back to the model; it does not answer directly. The
    model combines it with the procedure retrieved from the knowledge base.
 
-No request is made when the connector is not configured. A network,
-authentication or parsing failure produces `unknown`, never `up` or `down`.
+A network, authentication or parsing failure produces `unknown`, never `up` or
+`down`; see *Configuration* below for when no request is made at all.
 
 ### Cheshire Cat prerequisite
 
@@ -46,7 +49,7 @@ value on the target deployment before going live.
 
 ## Design decisions
 
-Five choices the rest depends on.
+Six choices the rest depends on.
 
 **It reads `/metrics`, not the status page.** Uptime Kuma has no general REST
 API — the dashboard talks Socket.IO after authenticating. Of the public
@@ -76,7 +79,8 @@ them about.
 exposes tags, using them is deliberately deferred. The first version uses the
 monitor name and the alias map in the plugin settings. Name matching costs no
 upkeep; aliases cover names no heuristic can reach, such as
-`srv-ugov-prod-01`. Several matches are all reported with their own state.
+`srv-ugov-prod-01`. Several matches are all reported with their own state, using
+neutral ordinal labels: external monitor names never enter the model context.
 
 **Four outcomes, never two.** `known`, `not_monitored`, `ambiguous`, and
 `unknown`, where the last two carry the weight of the design. A check that
@@ -111,6 +115,27 @@ The invariant, in four words: **never invent a state.**
   deliberately absent.
 - Authenticating to the dashboard over Socket.IO.
 - Opening tickets, sending email, operational escalation.
+
+## Installing and activating
+
+The plugin folder is `uptime_kuma_connector`, matching the Python module and
+the repository name. Cheshire Cat loads a plugin from a folder under
+`cat/plugins/` on the instance; see the
+[Cheshire Cat 1.x documentation](https://cheshire-cat-ai.github.io/docs/1/)
+for how your deployment installs one — typically either by placing the folder
+there directly, or by uploading the zip built by `python package-plugin.py`
+(`dist/uptime_kuma_connector-<version>.zip`) through the admin panel.
+
+Once the folder is in place:
+
+1. Open the Cheshire Cat admin panel and go to **Plugins**.
+2. Find **Uptime Kuma Connector** in the list and switch it on.
+3. Confirm activation in the core log: it prints exactly one line, starting
+   with `[uptime_kuma_connector] plugin activated`. No line means the plugin
+   failed to load — check the log for the error instead of assuming it is
+   running.
+4. Continue with *Configuration* below: an activated but unconfigured plugin
+   makes no network call and answers every question with `unknown`.
 
 ## Configuration
 
@@ -151,11 +176,23 @@ the service name — and real across a campus LAN. HTTPS with certificate
 verification disabled is not offered: it exposes the key exactly as HTTP does
 while suggesting the channel is protected.
 
+### Creating the API key on Uptime Kuma
+
+Assuming Uptime Kuma is already installed, running and configured with the
+monitors to expose:
+
+1. Log into the Uptime Kuma dashboard and open **Settings → API Keys**.
+2. Click **Add API Key**, give it a name (e.g. `uptime_kuma_connector`), and
+   optionally set an expiry date.
+3. Copy the generated key immediately — Uptime Kuma shows it only once, at
+   creation time, and cannot display it again afterwards.
+4. Paste it into this plugin's **Uptime Kuma: API key** field, below.
+
 ### Uptime Kuma: API key
 
-Generate it in the Uptime Kuma dashboard, under **Settings → API Keys**, and
-paste it here. The plugin authenticates the way Uptime Kuma expects, which is
-not obvious: basic auth with an **empty username** and the key as the password.
+The key created above, pasted as is. The plugin authenticates the way Uptime
+Kuma expects, which is not obvious: basic auth with an **empty username** and
+the key as the password.
 
 Only whitespace is stripped from what you paste — a trailing newline from a
 copy-paste would otherwise travel inside the header and turn every call into a
@@ -172,11 +209,12 @@ Three things worth knowing before you paste one:
   stays out of the repository — but it is in every backup, container snapshot
   and support copy of that folder. Rotate the key if the folder is ever copied.
 - **It never reaches a log line.** On the call path the plugin logs the type of
-  an exception and never its text, and never the request headers. Each configured
-  request logs its start at `INFO`; a completed request logs its resolution
-  outcome, while a failed request remains a `WARNING`. No URL, key, header or
-  monitor name is included. Every plugin log starts with
-  `[uptime_kuma_connector]`. Tests assert these boundaries.
+  an exception and never its text, and never the request headers or the
+  instance URL. Each configured request logs its start at `INFO`; a completed
+  request logs its resolution outcome, while a failed request remains a
+  `WARNING`. Every plugin log starts with `[uptime_kuma_connector]`. Tests
+  assert these boundaries. This guarantee covers the credential only: monitor
+  **names** do reach a `WARNING` line on purpose — see below.
 
 ### Uptime Kuma: mappa alias
 
@@ -222,10 +260,18 @@ whole, because one stray character must not disable the resolution of every
 other service. The cost is that the panel reports nothing: the discarded line is
 named in the log, and that is where to look when an alias does not work.
 
+**A request that matches no monitor also logs, at `WARNING`, the requested name
+and up to three of the closest monitor names** — the only channel an
+administrator has for spotting a typo in an alias or a name nobody wrote an
+alias for. Those names never reach the sentence returned to the model or the
+user; the log is the one place they appear.
+
 You usually need fewer entries than you would expect. Before matching, names and
 queries are lowercased, their internal whitespace collapsed, and `-`, `.` and
 `_` removed — which is why "UGOV" already finds `U-GOV - Autenticazione` without
-an alias.
+an alias. A query shorter than three characters only matches a monitor name by
+whole word, never by substring, so a single letter cannot accidentally match
+every name that happens to contain it.
 
 ### What is deliberately not configurable
 
@@ -274,10 +320,10 @@ python run-tests.py --detailed
 The runner reports how to start `cheshire-cat-core` if the container is not
 running.
 
-The unit tier covers parsing, aliases, resolution and all response outcomes.
-The integration tier covers settings, validators, tool wiring and adapter
-behaviour with a fake Cat and mocked HTTP. Neither tier contacts a live Uptime
-Kuma instance.
+The unit tier covers parsing, aliases, resolution, all response outcomes, and
+the packaging file list. The integration tier covers settings, validators,
+tool wiring and adapter behaviour with a fake Cat and mocked HTTP. Neither
+tier contacts a live Uptime Kuma instance.
 
 ## Verifying that a question invoked the tool
 
@@ -295,8 +341,9 @@ the tool, passed it the service name and used its result.
 
 ## Before this can be published
 
-Two of the four checks below closed as documented limitations rather than
-completed captures — recorded here plainly rather than left open-ended, per
+All four checks below are done; kept here as a record rather than removed,
+since the first closed as a documented limitation rather than a completed
+capture — recorded plainly rather than left open-ended, per
 `ISSUES_RESOLVED.md`.
 
 1. ~~Capture a complete `/metrics` line while a monitor is pending or in
@@ -309,9 +356,10 @@ completed captures — recorded here plainly rather than left open-ended, per
    the production deployment.
 3. ~~Choose a licence and add the file — the registry requires open source.~~
    Done: [GNU GPLv3](LICENSE).
-4. Choose and verify the release version, run `python package-plugin.py` to
+4. ~~Choose and verify the release version, run `python package-plugin.py` to
    build `dist/uptime_kuma_connector-<version>.zip`, and publish the
-   repository so the registry thumbnail resolves.
+   repository so the registry thumbnail resolves.~~ Done: version `0.0.3`,
+   the repository is public.
 
 ## License
 
