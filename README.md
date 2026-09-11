@@ -1,12 +1,11 @@
 # Uptime Kuma Connector
 
-A Cheshire Cat AI plugin that lets a help-desk assistant answer one question:
-**is this service currently up?** It reads monitor state from an
+A Cheshire Cat AI plugin that lets a help-desk assistant answer questions about the state of a service (e.g. **is this service currently up?**). It reads monitor state from an
 [Uptime Kuma](https://github.com/louislam/uptime-kuma) instance on demand, at
 the moment the question is asked.
 
 The point is to tell a service fault apart from a problem with the user's own
-device — the most common question at a first-level help desk, and the one an
+device; the most common question at a first-level help desk, and the one an
 assistant usually has no data for. Without it, the assistant answers with the
 right procedure to a user whose actual problem is that the service is down.
 
@@ -14,14 +13,14 @@ right procedure to a user whose actual problem is that the service is down.
 ## How it works
 
 1. The user reports that a service is unavailable, or asks whether it is down.
-2. Cheshire Cat retrieves the tool from procedural memory and calls
-   `service_status()` with the service name inferred by the model.
+2. Cheshire Cat retrieves the tool from procedural memory and calls the method
+   `service_status()` of this plugin with the service name inferred by the model.
 3. The plugin reads `GET <instance>/metrics` with the configured API key, within
-   the configured request deadline — two seconds by default.
+   the configured request deadline, two seconds by default.
 4. It parses the `monitor_status` lines and resolves the requested service: by
    alias, then by exact name, then by containment. See *Resolving a service
    name*.
-5. It returns one of four outcomes, with an Italian sentence that never invents
+5. It returns one of four outcomes, with a sentence that never invents
    a state.
 6. The tool hands that sentence to the model rather than answering the user. The
    model combines it with the procedure retrieved from the knowledge base.
@@ -30,7 +29,7 @@ right procedure to a user whose actual problem is that the service is down.
 
 | Outcome | When | What the model is told |
 | --- | --- | --- |
-| `known` | The service resolves to monitors with recognised statuses — up to five by name, up to ten through one alias | The service, and the state of each check |
+| `known` | The service resolves to monitors with recognised statuses; up to five by name, up to ten through one alias | The service, and the state of each check |
 | `not_monitored` | No monitor matches | That no check exists, **and that this does not mean the service works** |
 | `ambiguous` | More monitors match than those ceilings allow | That the request does not identify a service, and to ask the user which one |
 | `unknown` | Five cases, below | That the state is not known, **and not to conclude anything** |
