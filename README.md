@@ -39,9 +39,11 @@ that reports a service as healthy because its monitor is unreachable is worse
 than no check at all: the user takes the false reassurance as being about the
 service rather than about the tool. Its sentence therefore tells the model
 explicitly not to conclude anything — a model asked "is the VPN down?" fills a
-silence if it is allowed to.
+silence if it is allowed to. `not_monitored` is the opposite and never a
+synonym: "no check exists for that service" is certain, while "I do not know"
+is our own malfunction.
 
-Five things produce it:
+Five things produce `unknown`:
 
 - the connector is not configured, in which case no request is made at all;
 - the instance is unreachable, refuses the key, or does not answer in time;
@@ -51,9 +53,6 @@ Five things produce it:
   "not monitored" would put the blame in the wrong place;
 - a monitor reports a status code outside the four known ones. An unrecognised
   code is never mapped onto `down` for convenience.
-
-And `not_monitored` is a separate answer, never a synonym: "no check exists for
-that service" is certain, while "I do not know" is our own malfunction.
 
 The invariant, in four words: **never invent a state.**
 
@@ -119,10 +118,11 @@ the user would open a ticket for scheduled work the assistant could have told
 them about.
 
 **A name is resolved two ways, not three.** `/metrics` also exposes monitor
-tags, and using them is deliberately deferred: it would need a tag naming
-convention agreed with whoever runs the instance. Automatic name matching costs
-no upkeep, and the alias map covers what no heuristic can reach — a monitor
-called `srv-ugov-prod-01`.
+tags, and they are not used: resolving by tag would require a naming convention
+agreed with whoever runs the monitoring instance, making the plugin depend on
+configuration it does not control. The two sources it does use need no such
+agreement — automatic name matching costs no upkeep, and the alias map covers
+what no heuristic can reach, a monitor called `srv-ugov-prod-01`.
 
 ## Architecture
 
@@ -140,6 +140,11 @@ The split keeps every decision testable without a running Cat, and keeps the
 adapter thin enough to read.
 
 ## Requirements
+
+**Cheshire Cat AI 1.9.2**, on the `1.x` line — the one core this plugin has been
+run against, declared in `plugin.json` as `min_cat_version`. That field is a
+statement, not a gate: the core reads it into the plugin metadata and never
+compares it, so nothing stops an installation on an older core.
 
 `httpx` only, declared in `requirements.txt` with a permissive range. It ships
 in the Cheshire Cat image but is not declared by the core, so nothing promises
@@ -315,20 +320,18 @@ python run-tests.py                 # both
 python run-tests.py --detailed      # ...listing every test name
 ```
 
-The unit tier covers parsing, aliases, resolution, every outcome and the
-packaging file list. The integration tier covers the settings, the validators,
-the tool registration and the adapter's behaviour against a fake Cat and a
-mocked HTTP call — including the case that matters most, an unreachable instance
-yielding `unknown` with a sentence that claims neither that the service is up nor
-that it is down. The runner prints how to start the container when it is not
-running.
+The unit tier runs anywhere: it exercises `kuma_client.py`, which imports
+nothing from `cat`. The integration tier needs the running core container,
+because the adapter imports `cat` at import time — the runner prints how to
+start it when it is not running.
 
 Neither tier contacts a live Uptime Kuma instance.
 
-## Checking that a question actually invoked the tool
+## Confirming the tool was used
 
-The chatbot's answer alone is not proof. Filter the core logs — do not share
-their raw output, which may contain session tokens:
+The assistant's reply does not say which tool produced it. The core logs do —
+filter them rather than sharing their raw output, which may contain session
+tokens:
 
 ```powershell
 docker compose logs --since 5m cheshire-cat-core 2>&1 |
@@ -381,12 +384,11 @@ response body, and never the key.
 
 ## Limitations
 
-- **`pending` and `maintenance` are implemented but unobserved.** The `/metrics`
-  fixtures the parser is tested against were captured from a real instance, and
-  they contain `up` and `down`. `pending` appeared only transiently, with no
-  complete line to capture, and `maintenance` could not be produced on that
-  instance at all. Both are handled per Uptime Kuma's documented format, which
-  is a weaker guarantee than a captured response.
+- **All four Uptime Kuma statuses are handled; two have never been seen in the
+  wild.** The parser's fixtures were captured from a real instance and contain
+  `up` and `down`. `pending` and `maintenance` are implemented from Uptime
+  Kuma's documented format and covered by tests, but no captured response
+  contains them: the instance used for development never produced one.
 - **`/metrics` carries no timestamp.** The Prometheus format asserts by
   convention that a value is current, so the plugin cannot tell whether Uptime
   Kuma measured it a second or an hour ago. A paused monitor was confirmed to
