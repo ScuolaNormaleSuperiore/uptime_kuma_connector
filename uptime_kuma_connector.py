@@ -79,6 +79,22 @@ def _read_metrics_stream(
     return payload.decode("utf-8")
 
 
+def _describe_failure(failure: BaseException) -> str:
+    """Name a failure for the log without quoting anything it carries.
+
+    The exception type alone makes a wrong key, a wrong URL, a broken instance
+    and an unfollowed redirect indistinguishable: all four are
+    `HTTPStatusError`. The HTTP status code separates them and is the one
+    detail here that is not sensitive — unlike the URL, the headers and the
+    response body, which never reach a log line and are not added by this.
+    """
+    name = type(failure).__name__
+    status_code = getattr(getattr(failure, "response", None), "status_code", None)
+    if isinstance(status_code, int):
+        return f"{name} {status_code}"
+    return name
+
+
 def _fetch_metrics(
     settings: UptimeKumaConnectorSettings, authorization: str
 ) -> str:
@@ -394,11 +410,12 @@ def service_status(service_name: str, cat) -> str:
         return sentence
     except Exception as failure:
         # The exception text may contain the URL, the Authorization header, or
-        # an echoed credential. Its type gives operations enough to diagnose a
-        # failure without taking that risk.
+        # an echoed credential. Its type, plus the HTTP status code when there
+        # is one, gives operations enough to diagnose a failure without taking
+        # that risk.
         log.warning(
             "[uptime_kuma_connector] could not read the monitoring endpoint "
-            f"({type(failure).__name__}); the status is unknown."
+            f"({_describe_failure(failure)}); the status is unknown."
         )
         return kuma_client.unreachable_sentence(service_name)
 

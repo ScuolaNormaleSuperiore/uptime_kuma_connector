@@ -296,6 +296,39 @@ class TestParseMonitorMetrics:
     def test_no_monitor_status_line_returns_empty_mappings(self):
         assert kuma_client.parse_monitor_metrics("# no monitor status\n") == ({}, {})
 
+    def test_a_decimal_status_value_is_read_as_its_integer(self):
+        # The exposition format defines a sample value as a float, so an
+        # instance emitting `1.0` everywhere must not leave the parser with
+        # nothing — which would answer `unknown` to every question for ever.
+        payload = "\n".join(
+            (
+                'monitor_status{monitor_id="1",monitor_name="VPN"} 1.0',
+                'monitor_status{monitor_id="2",monitor_name="Posta"} 0.0',
+            )
+        )
+
+        assert kuma_client.parse_monitor_metrics(payload) == (
+            {1: "VPN", 2: "Posta"},
+            {1: kuma_client.STATUS_UP, 2: kuma_client.STATUS_DOWN},
+        )
+
+    def test_non_integral_and_special_values_are_discarded(self):
+        # A status code is an integer; a fractional value, an infinity or a
+        # NaN is not one, and must never be rounded into a state.
+        payload = "\n".join(
+            (
+                'monitor_status{monitor_id="1",monitor_name="Fraction"} 1.5',
+                'monitor_status{monitor_id="2",monitor_name="Infinite"} +Inf',
+                'monitor_status{monitor_id="3",monitor_name="NotANumber"} NaN',
+                'monitor_status{monitor_id="4",monitor_name="Valid"} 1',
+            )
+        )
+
+        assert kuma_client.parse_monitor_metrics(payload) == (
+            {4: "Valid"},
+            {4: kuma_client.STATUS_UP},
+        )
+
     def test_unsafe_monitor_names_are_discarded_individually(self):
         payload = "\n".join(
             (
@@ -587,6 +620,32 @@ class TestDescribeStatus:
         assert "VPN" not in sentence
         assert "attivo" not in sentence
 
+    def test_a_request_naming_no_service_is_ambiguous(self):
+        # The model may invoke the tool with nothing when the message names no
+        # service. `not_monitored` asserts that no check exists, which would be
+        # a certainty about a service the user never named.
+        payload = self.payload((17, "VPN", kuma_client.STATUS_UP))
+
+        for requested in ("", "   ", None):
+            outcome, sentence = kuma_client.describe_status(payload, requested)
+
+            assert outcome == kuma_client.OUTCOME_AMBIGUOUS
+            assert sentence == (
+                "La richiesta non indica alcun servizio. Chiedi all'utente di "
+                "quale servizio vuole conoscere lo stato."
+            )
+            assert "per ." not in sentence
+            assert "di ." not in sentence
+
+    def test_a_punctuation_only_request_is_ambiguous(self):
+        # It normalises to nothing exactly as an empty request does, so it must
+        # not be reported as a service that is certainly unmonitored either.
+        outcome, _sentence = kuma_client.describe_status(
+            self.payload((17, "VPN", kuma_client.STATUS_UP)), "---"
+        )
+
+        assert outcome == kuma_client.OUTCOME_AMBIGUOUS
+
     def test_a_punctuation_only_monitor_name_is_not_monitored(self):
         outcome, _sentence = kuma_client.describe_status(
             self.payload((1, "---", kuma_client.STATUS_UP)), "Posta"
@@ -616,6 +675,21 @@ class TestDescribeStatus:
             "conclusioni: non affermare né che il servizio è attivo né che è "
             "guasto."
         )
+
+    def test_unreachable_sentence_without_a_service_name_stays_well_formed(self):
+        # Reachable when `/metrics` cannot be read at all and the model invoked
+        # the tool with nothing: the outcome is `unknown` either way, but the
+        # sentence must not trail off into "lo stato di .".
+        for requested in ("", "   ", None, "---"):
+            sentence = kuma_client.unreachable_sentence(requested)
+
+            assert sentence == (
+                "Non è stato possibile determinare lo stato del servizio "
+                "richiesto. Non trarre conclusioni: non affermare né che il "
+                "servizio è attivo né che è guasto."
+            )
+            assert "stato di ." not in sentence
+            assert "Non trarre conclusioni" in sentence
 
     def test_sentences_do_not_expose_metric_metadata(self):
         payload = (

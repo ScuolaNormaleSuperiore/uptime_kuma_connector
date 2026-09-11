@@ -31,7 +31,7 @@ right procedure to a user whose actual problem is that the service is down.
 | --- | --- | --- |
 | `known` | The service resolves to monitors with recognised statuses; up to five by name, up to ten through one alias | The service, and the state of each check |
 | `not_monitored` | No monitor matches | That no check exists, **and that this does not mean the service works** |
-| `ambiguous` | More monitors match than those ceilings allow | That the request does not identify a service, and to ask the user which one |
+| `ambiguous` | More monitors match than those ceilings allow, or the request names no service at all | That the request does not identify a service, and to ask the user which one |
 | `unknown` | Five cases, below | That the state is not known, **and not to conclude anything** |
 
 `unknown` is the outcome the design rests on, and it is never silence. A check
@@ -348,6 +348,36 @@ The plugin's own success line adds the outcome and how the name was resolved:
 `resolution: alias` means the settings map was used, `name` means automatic name
 matching, and `none` means nothing matched. Every line the plugin logs starts
 with `[uptime_kuma_connector]`.
+
+### When it does not work, read the failure line
+
+A failed read logs the exception type and, when the instance answered at all,
+the HTTP status code:
+
+```text
+[uptime_kuma_connector] could not read the monitoring endpoint (HTTPStatusError 401); the status is unknown.
+```
+
+That code is the only thing separating the common misconfigurations, which
+otherwise all look identical:
+
+| In the log | What it usually means |
+| --- | --- |
+| `HTTPStatusError 401` | The API key is wrong, expired, or revoked |
+| `HTTPStatusError 404` | The URL points at something that is not an Uptime Kuma instance, or at a sub-path that does not exist |
+| `HTTPStatusError 301` or `307` | **The instance redirects, and redirects are not followed** — see below |
+| `ConnectError` / `ConnectTimeout` | The host is unreachable from the container: wrong hostname, wrong port, or a network the container cannot see |
+| `ReadTimeout` | The instance is reachable but did not answer within the configured timeout |
+
+**Redirects are deliberately not followed.** An instance behind a reverse proxy
+that answers `301` or `307` — typically an `http` URL redirecting to `https` —
+therefore fails rather than silently working. That is the intent: following it
+would query a URL the administrator never configured, and hide the
+misconfiguration instead of showing it. Fix the configured URL to the one the
+instance actually serves.
+
+Nothing else is logged on that path: not the URL, not the headers, not the
+response body, and never the key.
 
 ## Limitations
 

@@ -285,6 +285,53 @@ class TestServiceStatusBehaviour:
         assert lines
         assert not any(canary in line for line in lines)
         assert any("HTTPStatusError" in line for line in lines)
+        # The status code is what separates a wrong key from a wrong URL; the
+        # URL, the header and the response body stay out of the line.
+        assert any("401" in line for line in lines)
+        assert not any("kuma.example.org" in line for line in lines)
+        assert not any("Authorization" in line or "Basic " in line for line in lines)
+
+    def test_an_unfollowed_redirect_is_logged_with_its_status_code(self, monkeypatch):
+        # `httpx.stream()` does not follow redirects, so an instance behind a
+        # reverse proxy answering 301 is `unknown` for ever. Without the code
+        # in the log it is indistinguishable from a wrong key.
+        lines = []
+        request = connector.httpx.Request("GET", "https://kuma.example.org/metrics")
+        response = connector.httpx.Response(301, request=request)
+        failure = connector.httpx.HTTPStatusError(
+            "moved", request=request, response=response
+        )
+        monkeypatch.setattr(
+            connector.httpx,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse("", failure),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "key"}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert any("301" in line for line in lines)
+
+    def test_a_failure_carrying_no_response_is_logged_by_type_alone(self, monkeypatch):
+        # A timeout or a DNS failure has no status code, and must still log.
+        lines = []
+        monkeypatch.setattr(
+            connector.httpx,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(
+                "", connector.httpx.ConnectError("unreachable")
+            ),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+
+        self.call({"base_url": "https://kuma.example.org", "api_key": "key"})
+
+        assert any("ConnectError" in line for line in lines)
 
     def test_the_request_uses_the_metrics_url_auth_header_and_timeout(self, monkeypatch):
         captured = {}

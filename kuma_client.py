@@ -294,7 +294,8 @@ def parse_monitor_metrics(payload: str) -> tuple[dict[int, str], dict[int, int]]
 
     A malformed line or a missing label is skipped, never raised on. The label
     format is the part most easily assumed wrong, which is why the fixtures for
-    this function must come from a real response.
+    this function must come from a real response. The status value is read as
+    the float the exposition format says it is, and kept only when integral.
     """
     names: dict[int, str] = {}
     statuses: dict[int, int] = {}
@@ -315,9 +316,20 @@ def parse_monitor_metrics(payload: str) -> tuple[dict[int, str], dict[int, int]]
         try:
             monitor_id = int(labels["monitor_id"])
             monitor_name = labels["monitor_name"]
-            status = int(match.group(2))
+            # The exposition format defines a sample value as a float, so `1`
+            # and `1.0` are the same metric and an instance is free to emit
+            # either. Reading it as an int would skip every line of an instance
+            # that emits the decimal form, leaving nothing to resolve against
+            # and answering `unknown` to every question with no error to show
+            # for it. `NaN` and `±Inf` parse as floats and are rejected here,
+            # by the same test that rejects a non-integral value.
+            value = float(match.group(2))
         except (KeyError, TypeError, ValueError):
             continue
+
+        if not value.is_integer():
+            continue
+        status = int(value)
 
         if not _is_safe_monitor_name(monitor_name):
             continue
@@ -460,8 +472,20 @@ def describe_resolution(
     Returns `(outcome, sentence)`, where the outcome is one of the four
     constants above and the sentence is what reaches the model. A broken alias
     or an unrecognised status is `unknown`: neither may be misreported as a
-    working service.
+    working service, and a request naming no service at all is `ambiguous`
+    rather than a certainty about a service nobody named.
     """
+    # A request that names nothing is not a search miss: `not_monitored` is a
+    # certain answer, and there is nothing here to be certain about. The model
+    # may legitimately call the tool with no argument, so this is a reachable
+    # path and not a defensive check.
+    if not normalise_name(resolution.requested_name):
+        return (
+            OUTCOME_AMBIGUOUS,
+            "La richiesta non indica alcun servizio. Chiedi all'utente di "
+            "quale servizio vuole conoscere lo stato.",
+        )
+
     if resolution.used_alias and not resolution.matches:
         return OUTCOME_UNKNOWN, unreachable_sentence(resolution.requested_name)
 
@@ -541,9 +565,16 @@ def unreachable_sentence(service_name: str) -> str:
     to conclude anything: asked "is the VPN down?", a model fills a silence if
     it is allowed to. This is the invariant of the whole plugin — never invent
     a state.
+
+    A request that names no service is reachable here too, when `/metrics`
+    itself could not be read: the sentence then drops the interpolation rather
+    than leaving a dangling "di .". The outcome is `unknown` either way, and the
+    clause forbidding any conclusion is never varied.
     """
+    requested = _truncate_service_name(service_name)
+    subject = f"di {requested}" if normalise_name(requested) else "del servizio richiesto"
     return (
-        f"Non è stato possibile determinare lo stato di {_truncate_service_name(service_name)}. "
+        f"Non è stato possibile determinare lo stato {subject}. "
         "Non trarre conclusioni: non affermare né che il servizio è attivo né "
         "che è guasto."
     )
