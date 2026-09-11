@@ -142,6 +142,41 @@ class TestToolWiring:
 
         assert "service_name" in description
 
+    def test_the_description_forbids_shortening_a_name_to_its_acronym(self):
+        # Observed on a live instance: from a message naming "the XX portal"
+        # the model passed the bare acronym, which matched ten monitors and
+        # resolved to ambiguous, while the full name resolves to one. The ban
+        # is explicit because a rule that merely describes gets interpreted.
+        description = connector.service_status.description.lower()
+
+        assert "acronym" in description
+        assert "never" in description
+
+    def test_the_description_forbids_translating_the_name(self):
+        # Also observed live, and caused by an earlier wording of this very
+        # docstring: given an English example, the model translated the
+        # service name out of the user's language, and the translated form
+        # matched no monitor at all — a false not_monitored, which is worse
+        # than the ambiguous it replaced. Hence "verbatim" and an example
+        # whose words do not invite translation.
+        description = connector.service_status.description.lower()
+
+        assert "verbatim" in description
+        assert "translat" in description
+
+    def test_the_description_names_no_real_service(self):
+        # It carries an example now, and an example is where internal topology
+        # creeps in. The same placeholder rule as the retrieval phrasings.
+        description = connector.service_status.description.upper()
+
+        named = [
+            service
+            for service in ("U-GOV", "UGOV", "ESSE3", "KTO", "SNS")
+            if service in description
+        ]
+
+        assert named == [], f"description naming a real service: {named}"
+
     def test_the_retrieval_phrasings_are_examples_in_both_languages(self):
         # Each example becomes a procedural trigger of its own, while the
         # docstring becomes a single averaged one. Two languages are therefore

@@ -373,8 +373,13 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
 def service_status(service_name: str, cat) -> str:
     """Current status of a monitored service, when a user suspects an outage.
 
-    Call this only if the message names a service: pass that name as
-    service_name. If no service is named, ask which one instead.
+    Call this only if the message names a service. Pass that name as
+    service_name copied verbatim from the message, in the user's own
+    language and never translated, keeping every qualifying word: if the
+    message names "the XX gateway", pass "XX gateway", not "XX". Never
+    reduce a name to its acronym — an acronym on its own matches many
+    services and identifies none. If no service is named, ask which one
+    instead.
     """
     try:
         settings = load_settings(cat)

@@ -1,13 +1,10 @@
 # Uptime Kuma Connector
 
-A Cheshire Cat AI plugin that lets a help-desk assistant answer questions about the state of a service (e.g. **is this service currently up?**). It reads monitor state from an
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) instance on demand, at
-the moment the question is asked.
+A ***Cheshire Cat AI*** plugin that enables a help-desk assistant to answer questions about service status in real time (e.g., "Is this service currently up?"). It fetches live monitor data from an ***[Uptime Kuma](https://github.com/louislam/uptime-kuma)*** instance on demand, right when the user asks.
 
-The point is to tell a service fault apart from a problem with the user's own
-device; the most common question at a first-level help desk, and the one an
-assistant usually has no data for. Without it, the assistant answers with the
-right procedure to a user whose actual problem is that the service is down.
+
+Uptime Kuma is open-source software that monitors the status of services and applications.
+This plugin implements a tool that queries Uptime Kuma, enabling the chatbot to distinguish between an actual service outage and an issue with the user's local device. This distinction addresses one of the most common scenarios in first-level support—an area where AI-based assistants often lack sufficient data. Without this plugin, the assistant might suggest troubleshooting steps to a user whose actual problem is simply that the service is unavailable.
 
 
 ## How it works
