@@ -307,11 +307,27 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
 
 @tool(return_direct=False)
 def service_status(service_name: str, cat) -> str:
-    """Verifica se un servizio è attivo quando l'utente segnala un problema.
+    """Verifica lo stato di un servizio quando l'utente sospetta un
+    malfunzionamento o segnala un problema.
 
-    Usalo per domande come «la VPN non funziona», «non riesco ad autenticarmi su
-    U-GOV», «non riesco ad accedere a Esse3», «il portale è giù?» o «è un
-    problema mio o del servizio?». Passa il nome del servizio chiesto dall'utente.
+    Usalo per domande come
+    «Non riesco ad accedere a XX»,
+    «non riesco a fare login su XX»,
+    «non riesco ad autenticarmi»,
+    «la VPN non funziona»,
+    «il portale dà errore»,
+    «il sito non si apre»,
+    «il portale è giù?»,
+    «il sito XX dà errore»,
+    «è lento da stamattina»,
+    «il servizio è raggiungibile?»,
+    «è un problema noto?»,
+    «ci sono disservizi in corso?»,
+    «da voi funziona?»,
+    «è un problema mio o del servizio?».
+
+    Invocalo solo se la frase nomina un servizio: passa quel nome come
+    service_name. Se nessun servizio è nominato, chiedi quale.
     """
     try:
         settings = load_settings(cat)
