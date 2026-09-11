@@ -305,29 +305,60 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         log.warning(f"[uptime_kuma_connector] alias map, {problem}")
 
 
-@tool(return_direct=False)
+# The retrieval phrasings live here rather than in the docstring, and the
+# distinction is not cosmetic. `CatTool` builds two kinds of procedural
+# trigger: the docstring becomes **one** vector, `f"{name}: {description}"`,
+# while every entry of `examples` becomes a vector of its own. A dozen
+# phrasings inside the docstring are therefore averaged into a single point
+# that is close to none of them in particular; the same phrasings here are
+# each matched directly against the user's message.
+#
+# That is also what makes two languages free. Italian and English phrasings in
+# one description would dilute each other, since the vector is their mean.
+# As separate vectors an Italian question matches the Italian entries and an
+# English one the English entries, and neither pays for the other.
+#
+# The service name stays a placeholder. The phrasings have to be reusable by
+# any installation, and a real service name in a tracked, public file is
+# internal topology that buys nothing: a monitor is reached by name matching
+# or by an alias, never by being mentioned here.
+@tool(
+    return_direct=False,
+    examples=[
+        "Non riesco ad accedere a XX",
+        "non riesco a fare login su XX",
+        "non riesco ad autenticarmi",
+        "la VPN non funziona",
+        "il portale dà errore",
+        "il sito non si apre",
+        "il portale è giù?",
+        "il sito XX dà errore",
+        "è lento da stamattina",
+        "il servizio è raggiungibile?",
+        "è un problema noto?",
+        "ci sono disservizi in corso?",
+        "da voi funziona?",
+        "è un problema mio o del servizio?",
+        "I can't access XX",
+        "I can't log in to XX",
+        "I can't authenticate",
+        "the VPN is not working",
+        "XX is giving an error",
+        "the site will not open",
+        "is XX down?",
+        "it has been slow since this morning",
+        "is the service reachable?",
+        "is this a known issue?",
+        "is there an outage?",
+        "does it work on your side?",
+        "is it my problem or the service?",
+    ],
+)
 def service_status(service_name: str, cat) -> str:
-    """Verifica lo stato di un servizio quando l'utente sospetta un
-    malfunzionamento o segnala un problema.
+    """Current status of a monitored service, when a user suspects an outage.
 
-    Usalo per domande come
-    «Non riesco ad accedere a XX»,
-    «non riesco a fare login su XX»,
-    «non riesco ad autenticarmi»,
-    «la VPN non funziona»,
-    «il portale dà errore»,
-    «il sito non si apre»,
-    «il portale è giù?»,
-    «il sito XX dà errore»,
-    «è lento da stamattina»,
-    «il servizio è raggiungibile?»,
-    «è un problema noto?»,
-    «ci sono disservizi in corso?»,
-    «da voi funziona?»,
-    «è un problema mio o del servizio?».
-
-    Invocalo solo se la frase nomina un servizio: passa quel nome come
-    service_name. Se nessun servizio è nominato, chiedi quale.
+    Call this only if the message names a service: pass that name as
+    service_name. If no service is named, ask which one instead.
     """
     try:
         settings = load_settings(cat)

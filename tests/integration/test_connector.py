@@ -133,7 +133,39 @@ class TestToolWiring:
     def test_service_status_is_a_non_direct_tool(self):
         assert connector.service_status.procedure_type == "tool"
         assert connector.service_status.return_direct is False
-        assert "VPN" in connector.service_status.description
+
+    def test_the_description_tells_the_model_what_to_pass(self):
+        # The docstring is no longer where the retrieval phrasings live, so
+        # what is left of it has one job: make the model pass a service name,
+        # and abstain when the message names none.
+        description = connector.service_status.description
+
+        assert "service_name" in description
+
+    def test_the_retrieval_phrasings_are_examples_in_both_languages(self):
+        # Each example becomes a procedural trigger of its own, while the
+        # docstring becomes a single averaged one. Two languages are therefore
+        # free here and would dilute each other in the description.
+        examples = connector.service_status.start_examples
+
+        assert len(examples) > 1
+        assert any("non riesco" in phrase.lower() for phrase in examples)
+        assert any("i can't" in phrase.lower() for phrase in examples)
+
+    def test_no_example_names_a_real_service(self):
+        # The phrasings ship to any installation, so they carry a placeholder
+        # rather than internal topology. A monitor is reached by name matching
+        # or by an alias, never by being mentioned here.
+        named = [
+            phrase
+            for phrase in connector.service_status.start_examples
+            if any(
+                service in phrase.upper()
+                for service in ("U-GOV", "UGOV", "ESSE3", "KTO")
+            )
+        ]
+
+        assert named == [], f"examples naming a real service: {named}"
 
     def test_no_flow_hook_is_registered(self):
         registered = [

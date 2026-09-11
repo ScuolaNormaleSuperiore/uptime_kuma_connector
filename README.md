@@ -10,10 +10,6 @@ device — the most common question at a first-level help desk, and the one an
 assistant usually has no data for. Without it, the assistant answers with the
 right procedure to a user whose actual problem is that the service is down.
 
-> **Status:** the first version is implemented and its automated suite is green.
-> Live questions against a real instance confirmed the `up`, `down` and
-> `not_monitored` answers. `pending` and `maintenance` are implemented but have
-> never been observed on the instance available for testing — see *Limitations*.
 
 ## How it works
 
