@@ -143,9 +143,15 @@ run against, declared in `plugin.json` as `min_cat_version`. That field is a
 statement, not a gate: the core reads it into the plugin metadata and never
 compares it, so nothing stops an installation on an older core.
 
-`httpx` only, declared in `requirements.txt` with a permissive range. It ships
-in the Cheshire Cat image but is not declared by the core, so nothing promises
-it, and a dependency missing at activation time is the expensive failure.
+`httpx` only, declared in `requirements.txt` with a permissive range.
+
+The core declares it too — `httpx==0.27.2`, among the dependencies in its
+`pyproject.toml` — so on a stock installation it is always there and the
+declaration here costs nothing: the core installs only what it does not already
+find, so activating this plugin runs no `pip` at all. The range is declared
+anyway, and deliberately: the core pins an **exact** version, this plugin is
+published beyond that one core, and a dependency missing at activation time is
+the expensive failure.
 
 **That file deliberately carries no comments and no blank lines.** Cheshire Cat
 does not hand it to pip: it calls `packaging.Requirement()` on each line, inside
