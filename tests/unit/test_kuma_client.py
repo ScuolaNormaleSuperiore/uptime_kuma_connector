@@ -95,12 +95,30 @@ class TestNormaliseName:
             "u-gov"
         )
 
-    def test_the_hyphen_is_insignificant(self):
-        # The rule that earns its keep: it makes "UGOV" match a monitor called
-        # "U-GOV - Autenticazione" without anybody writing an alias for it.
-        assert kuma_client.normalise_name("UGOV") in kuma_client.normalise_name(
+    def test_a_separator_becomes_a_space(self):
+        # Changed 2026-09-17. `normalise_name()` turns "-", "." and "_" into
+        # spaces rather than deleting them, so a name whose only separator is
+        # one of them reads as the words it is: "Portale-XX" has to meet
+        # "Portale XX", which deleting the hyphen made impossible — the query
+        # collapsed to "portalexx" and answered a false `not_monitored`.
+        assert kuma_client.normalise_name("Portale-XX") == kuma_client.normalise_name(
+            "Portale XX"
+        )
+
+    def test_the_fused_form_keeps_an_acronym_reachable(self):
+        # The other half of the pair, and the rule that earns its keep: it
+        # makes "UGOV" match a monitor called "U-GOV - Autenticazione" with no
+        # alias written by hand. `fuse_name()` removes separators instead of
+        # spacing them, which is what `normalise_name()` alone did until
+        # 2026-09-17.
+        assert kuma_client.fuse_name("UGOV") in kuma_client.fuse_name(
             "U-GOV - Autenticazione"
         )
+
+    def test_the_two_forms_are_not_the_same_function(self):
+        # If these ever agree on this input, one of the two cases above has
+        # quietly stopped being covered.
+        assert kuma_client.normalise_name("U-GOV") != kuma_client.fuse_name("U-GOV")
 
     def test_removing_punctuation_does_not_leave_double_spaces(self):
         # Order matters in the implementation: stripping "-" from "A - B" leaves
@@ -108,10 +126,13 @@ class TestNormaliseName:
         # that order this equals "a  b" and no containment test ever matches.
         assert kuma_client.normalise_name("A - B") == "a b"
 
-    def test_dots_and_underscores_fold_too(self):
+    def test_dots_and_underscores_behave_like_the_hyphen(self):
+        # Both forms, because each one answers a different question about the
+        # same name: spaced for "srv web 01", fused for "srvweb01".
         assert kuma_client.normalise_name("srv_web.01") == kuma_client.normalise_name(
-            "srvweb01"
+            "srv web 01"
         )
+        assert kuma_client.fuse_name("srv_web.01") == kuma_client.fuse_name("srvweb01")
 
     def test_it_survives_junk_input(self):
         # Called with whatever the model passed as an argument.
@@ -370,6 +391,48 @@ class TestFindMonitor:
 
         assert resolution.matches == ((13, "U-GOV - Autenticazione Cineca"),)
 
+    def test_a_separator_in_the_query_still_finds_the_spaced_monitor(self):
+        # The defect this pair of forms was introduced for. Written with a
+        # hyphen, a dot or an underscore, the query used to collapse into one
+        # token, match nothing, and answer `not_monitored` — a certainty, about
+        # a service that is monitored and up.
+        names = {6: "Portale XX"}
+
+        for written in ("Portale-XX", "portale_xx", "portale.xx", "PORTALE XX"):
+            resolution = kuma_client.find_monitor(names, written)
+
+            assert resolution.matches == ((6, "Portale XX"),), written
+
+    def test_an_acronym_still_reaches_a_hyphen_separated_monitor(self):
+        # The case the old rule existed for, and the one a naive fix breaks:
+        # it must keep working in both word orders.
+        names = {13: "U-GOV - Autenticazione Cineca"}
+
+        for written in ("UGOV", "U-GOV", "ugov autenticazione", "autenticazione UGOV"):
+            resolution = kuma_client.find_monitor(names, written)
+
+            assert resolution.matches == ((13, "U-GOV - Autenticazione Cineca"),), written
+
+    def test_an_alias_is_reached_however_its_separator_was_written(self):
+        # Alias keys are squashed, so the spelling of the separator is not part
+        # of the key — on either side of the comparison.
+        aliases, _ = kuma_client.parse_alias_map("U-GOV: 12")
+
+        for written in ("U-GOV", "UGOV", "u gov", "U.GOV"):
+            resolution = kuma_client.find_monitor({12: "Dodici"}, written, aliases)
+
+            assert resolution.used_alias, written
+            assert resolution.matches == ((12, "Dodici"),), written
+
+    def test_squashing_an_alias_key_does_not_make_the_match_fuzzy(self):
+        # The ceiling of the rule above: an alias stays an exact match.
+        aliases, _ = kuma_client.parse_alias_map("Portale Demo: 42")
+
+        resolution = kuma_client.find_monitor({42: "Qualcosa"}, "Portale Demo Test", aliases)
+
+        assert not resolution.used_alias
+        assert resolution.matches == ()
+
     def test_a_one_character_query_does_not_match_unrelated_monitors(self):
         # A single letter is a substring of almost any name; without a minimum
         # length this would report three unrelated services as matches.
@@ -584,7 +647,7 @@ class TestDescribeStatus:
         )
 
         outcome, sentence = kuma_client.describe_status(
-            payload, "Piattaforma unica", {"piattaforma unica": tuple(range(1, 8))}
+            payload, "Piattaforma unica", {"piattaformaunica": tuple(range(1, 8))}
         )
 
         assert outcome == kuma_client.OUTCOME_KNOWN
@@ -601,7 +664,7 @@ class TestDescribeStatus:
         )
 
         outcome, _sentence = kuma_client.describe_status(
-            payload, "Piattaforma unica", {"piattaforma unica": tuple(range(1, 12))}
+            payload, "Piattaforma unica", {"piattaformaunica": tuple(range(1, 12))}
         )
 
         assert outcome == kuma_client.OUTCOME_AMBIGUOUS

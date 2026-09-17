@@ -61,9 +61,16 @@ MAXIMUM_MONITOR_NAME_LENGTH = 160
 # name (an acronym such as "PA") is unaffected.
 MINIMUM_CONTAINMENT_LENGTH = 3
 
-# Removed before comparing names, so "UGOV" finds "U-GOV - Autenticazione" on
-# its own and a whole class of aliases never has to be written by hand.
-_INSIGNIFICANT_CHARACTERS = str.maketrans("", "", "-._")
+# Turned into spaces before comparing names, so that a hyphen, a dot or an
+# underscore used as a word separator reads as one. Every comparison is then
+# made twice, against this form and against the spaceless form built by
+# `fuse_name()`: "Portale-XX" has to meet "Portale XX", which needs the
+# separator to become a space, while "UGOV" has to meet "U-GOV - Something",
+# which needs it to vanish. Removing them outright — what this did until
+# 2026-09-17 — served only the second case and answered `not_monitored` to the
+# first, which is a certainty the plugin had no right to state.
+_SEPARATOR_CHARACTERS = str.maketrans("-._", "   ")
+_REMOVED_SEPARATORS = str.maketrans("", "", "-._")
 
 # This text comes from the model and reaches both a sentence for the user and
 # `log.warning()` calls in the adapter, verbatim. Stripped rather than merely
@@ -107,12 +114,32 @@ def normalise_name(value: str) -> str:
     Applied to all three sides — what the user asked, the monitor names, and the
     alias keys — so they are always compared in the same shape.
 
-    The order is load-bearing: the insignificant characters go first, because
-    removing them from "U-GOV - Autenticazione" leaves a double space that the
-    whitespace pass then has to collapse.
+    The order is load-bearing: the separators go first, because turning those
+    in "U-GOV - Autenticazione" into spaces leaves runs of whitespace that the
+    next pass then has to collapse.
+
+    This is the word-separated form. `fuse_name()` builds the other one, and
+    a comparison that uses only this one misses "UGOV" against "U-GOV".
     """
-    without_punctuation = str(value or "").translate(_INSIGNIFICANT_CHARACTERS)
-    return " ".join(without_punctuation.split()).casefold()
+    separated = str(value or "").translate(_SEPARATOR_CHARACTERS)
+    return " ".join(separated.split()).casefold()
+
+
+def fuse_name(value: str) -> str:
+    """Fold a name with its separators removed rather than turned into spaces.
+
+    "U-GOV - Autenticazione" becomes "ugov autenticazione", which is what lets
+    a query of "UGOV" reach it, and "autenticazione UGOV" too — the words stay
+    words, so the word-set comparison keeps working on them.
+
+    This was `normalise_name()` until 2026-09-17, and it is kept as the second
+    of two forms rather than replaced. Each one reaches a case the other
+    cannot: this one joins an acronym split by hyphens, the other separates
+    words joined by them. Comparing both is what makes "Portale-XX" and
+    "Portale XX" the same service without losing "UGOV".
+    """
+    without_separators = str(value or "").translate(_REMOVED_SEPARATORS)
+    return " ".join(without_separators.split()).casefold()
 
 
 def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, ...]]:
@@ -163,7 +190,11 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
 
         raw_aliases, raw_ids = line.split(":", 1)
 
-        names = [normalise_name(part) for part in raw_aliases.split(",")]
+        # Squashed rather than merely normalised: an alias is matched exactly,
+        # and "U-GOV", "Ugov" and "U GOV" have to be one key, not three. Since
+        # 2026-09-17 `normalise_name()` keeps the separator as a space, so it
+        # can no longer do that on its own.
+        names = [_squash(part) for part in raw_aliases.split(",")]
         names = [name for name in names if name]
         if not names:
             problems.append(f"line {number}: no alias before the ':'")
@@ -379,8 +410,11 @@ def find_monitor(
     if not normalised_wanted:
         return empty
 
+    # Both sides squashed, so the lookup stays a single exact dictionary hit
+    # while tolerating a disagreement about whether a separator was a space or
+    # a hyphen. Still exact: "Portale Demo" does not reach "Portale Demo Test".
     aliases = explicit_ids or {}
-    alias_ids = aliases.get(normalised_wanted)
+    alias_ids = aliases.get(_squash(requested_name))
     if alias_ids is not None:
         matches = tuple(
             (monitor_id, names[monitor_id])
@@ -392,10 +426,12 @@ def find_monitor(
         )
         return MonitorResolution(requested_name, matches, True, missing_ids)
 
+    fused_wanted = fuse_name(requested_name)
     exact_matches = tuple(
         (monitor_id, name)
         for monitor_id, name in names.items()
         if normalise_name(name) == normalised_wanted
+        or fuse_name(name) == fused_wanted
     )
     if exact_matches:
         return MonitorResolution(requested_name, exact_matches, False, ())
@@ -404,8 +440,20 @@ def find_monitor(
         (monitor_id, name)
         for monitor_id, name in names.items()
         if _names_contain_each_other(normalised_wanted, normalise_name(name))
+        or _names_contain_each_other(fused_wanted, fuse_name(name))
     )
     return MonitorResolution(requested_name, containment_matches, False, ())
+
+
+def _squash(value: str) -> str:
+    """Fold a name to its spaceless form, for the exact-alias comparison only.
+
+    The two sides of an alias lookup may disagree on whether a separator was a
+    space or a hyphen and must still be one key. Deliberately not used for
+    heuristic matching: with no word boundaries left it would match across
+    words a reader would keep apart.
+    """
+    return normalise_name(value).replace(" ", "")
 
 
 def _names_contain_each_other(left: str, right: str) -> bool:
@@ -415,6 +463,12 @@ def _names_contain_each_other(left: str, right: str) -> bool:
     `MINIMUM_CONTAINMENT_LENGTH` characters — otherwise a short query would
     match by coincidence inside unrelated names, such as a monitor whose name
     happens to share one common short syllable with it.
+
+    Called twice by `find_monitor()`, once on the word-separated form and once
+    on the fused one. Both branches matter on both forms: the fused form is
+    what carries "UGOV" and "autenticazione UGOV" against
+    "U-GOV - Autenticazione", the separated one what carries "Portale-XX"
+    against "Portale XX".
     """
     # A punctuation-only monitor name normalises to an empty string. Without
     # this guard its empty word set is a subset of every requested name, so it

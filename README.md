@@ -64,10 +64,18 @@ against what `/metrics` returned, in this order:
 3. containment either way — the query inside a monitor name, a monitor name
    inside the query, or the same words in a different order.
 
-All three comparisons are made on a normalised form: lowercased, internal
-whitespace collapsed, and `-`, `.` and `_` removed. That is why `UGOV` finds
-`U-GOV - Autenticazione` with no alias at all, and it removes a whole class of
-aliases nobody then has to write.
+All three comparisons are made on a normalised form — lowercased, internal
+whitespace collapsed — and on **two** readings of `-`, `.` and `_`, because
+those characters do two opposite jobs. Read as separators, `Portale-XX` is the
+same service as `Portale XX`. Read as noise to remove, `UGOV` finds
+`U-GOV - Autenticazione` with no alias at all, which removes a whole class of
+aliases nobody then has to write. Every comparison is made both ways, so
+neither case costs the other: reading them only as noise answered
+`not_monitored` to the first, a certainty about a service that was up.
+
+An alias key is folded further, to letters and digits with no spaces at all, so
+`U-GOV`, `UGOV` and `U GOV` are one key rather than three. It stays an exact
+match: `Portale Demo` still does not reach `Portale Demo Test`.
 
 Alias matching is exact after that normalisation, not fuzzy: `Portale Demo: 42`
 matches `Portale Demo` but not `Portale Demo Test`. To accept both, write
