@@ -59,18 +59,20 @@ def build(output_dir: Path | None = None) -> Path:
     metadata = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
     version = metadata["version"]
 
+    sources = tuple((name, PLUGIN_ROOT / name) for name in RUNTIME_FILES)
+    for name, source in sources:
+        if not source.is_file():
+            raise FileNotFoundError(
+                f"package-plugin.py: '{name}' is listed in RUNTIME_FILES "
+                "but does not exist."
+            )
+
     output_dir = output_dir or (PLUGIN_ROOT / "dist")
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"{PLUGIN_NAME}-{version}.zip"
 
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in RUNTIME_FILES:
-            source = PLUGIN_ROOT / name
-            if not source.is_file():
-                raise FileNotFoundError(
-                    f"package-plugin.py: '{name}' is listed in RUNTIME_FILES "
-                    "but does not exist."
-                )
+        for name, source in sources:
             archive.write(source, arcname=f"{PLUGIN_NAME}/{name}")
 
     return archive_path

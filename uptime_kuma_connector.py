@@ -18,7 +18,7 @@ between turns: the status is read when the question arrives.
 
 from difflib import SequenceMatcher
 from queue import Queue
-from threading import Event, Thread
+from threading import BoundedSemaphore, Event, Thread
 
 import httpx
 from cat.log import log
@@ -33,6 +33,7 @@ else:  # pragma: no cover - used by the repository's top-level test import
 
 BYTES_PER_KIBIBYTE = 1024
 RAW_RESPONSE_CHUNK_SIZE = 64 * BYTES_PER_KIBIBYTE
+MAXIMUM_IN_FLIGHT_METRICS_REQUESTS = 4
 
 # Reused across calls rather than opened and torn down per request. httpx's
 # own top-level functions (httpx.stream(), httpx.get(), ...) each create and
@@ -44,6 +45,13 @@ RAW_RESPONSE_CHUNK_SIZE = 64 * BYTES_PER_KIBIBYTE
 # state, nothing that grows across calls.
 _http_client = httpx.Client()
 
+# A deadline stops the conversation, but cannot forcibly interrupt a thread
+# blocked inside a socket operation. Bound those short-lived workers so a slow
+# endpoint cannot turn a burst of questions into unbounded threads or sockets.
+# This is a bulkhead, not a cache: a saturated slot answers `unknown` now and
+# no state about any monitor survives the call.
+_metrics_worker_slots = BoundedSemaphore(MAXIMUM_IN_FLIGHT_METRICS_REQUESTS)
+
 
 class MetricsResponseTooLarge(Exception):
     """The endpoint exceeded the configured in-memory response ceiling."""
@@ -51,6 +59,23 @@ class MetricsResponseTooLarge(Exception):
 
 class MetricsRequestDeadlineExceeded(Exception):
     """The complete request did not finish within its configured deadline."""
+
+
+class MetricsRequestCapacityExceeded(Exception):
+    """All bounded metrics workers are still finishing earlier requests."""
+
+
+def _safe_log(level: str, message: str) -> None:
+    """Write an operational message without letting the log sink affect a turn.
+
+    Logging is useful to an administrator but never part of the answer. A full
+    disk, unavailable stdout pipe, or custom sink must not turn a known answer
+    into `unknown`, make an error path raise, or prevent plugin activation.
+    """
+    try:
+        getattr(log, level)(message)
+    except Exception:
+        pass
 
 
 def _read_metrics_stream(
@@ -126,6 +151,9 @@ def _fetch_metrics(
     configured total deadline as well. Cancellation is observed between chunks;
     an in-progress socket operation remains bounded by the same httpx timeout.
     """
+    if not _metrics_worker_slots.acquire(blocking=False):
+        raise MetricsRequestCapacityExceeded
+
     result: Queue = Queue(maxsize=1)
     cancelled = Event()
 
@@ -141,9 +169,15 @@ def _fetch_metrics(
             result.put((True, payload))
         except Exception as failure:
             result.put((False, failure))
+        finally:
+            _metrics_worker_slots.release()
 
     worker = Thread(target=fetch, daemon=True, name="uptime-kuma-metrics")
-    worker.start()
+    try:
+        worker.start()
+    except Exception:
+        _metrics_worker_slots.release()
+        raise
     worker.join(settings.request_timeout_seconds)
     if worker.is_alive():
         cancelled.set()
@@ -185,7 +219,8 @@ def load_settings(cat) -> UptimeKumaConnectorSettings:
     try:
         stored = cat.mad_hatter.get_plugin().load_settings()
     except Exception as failure:  # the core, the file, or the plugin lookup
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] could not read the stored settings "
             f"({type(failure).__name__}); the connector stays disabled."
         )
@@ -198,7 +233,8 @@ def load_settings(cat) -> UptimeKumaConnectorSettings:
         # older version of the model: the strict base_url validator refuses it
         # on read as it would on save. Disabling the connector is the safe
         # answer; raising here would break a conversation over a typo.
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] the stored settings are not valid "
             f"({type(failure).__name__}); the connector stays disabled."
         )
@@ -261,7 +297,8 @@ def _report_resolution_problems(
         missing = ", ".join(
             str(monitor_id) for monitor_id in resolution.missing_alias_ids
         )
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] alias "
             f"'{resolution.requested_name}' refers to monitor ids absent from "
             f"/metrics: {missing}."
@@ -273,7 +310,8 @@ def _report_resolution_problems(
             tuple(kuma_client.monitored_service_names(names)),
         )
         suffix = f" Closest monitor names: {', '.join(closest)}." if closest else ""
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] no monitor matches "
             f"'{resolution.requested_name}'.{suffix}"
         )
@@ -322,7 +360,8 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         # not encryption, so on plain HTTP the credential is readable by
         # anything that sees the traffic. Negligible on a container network,
         # real across a campus LAN.
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] the instance URL is not HTTPS: the API key will "
             "travel in clear text on every call. Acceptable only if that "
             "traffic never leaves a private network."
@@ -332,14 +371,15 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
         # Half-configured is the state worth naming: somebody filled the URL and
         # stopped. Without this line the plugin is silently disabled and looks
         # configured in the panel.
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] the instance URL is set but the API key field is "
             "empty: the connector stays disabled and no call is made."
         )
 
     _aliases, problems = kuma_client.parse_alias_map(settings.alias_map)
     for problem in problems:
-        log.warning(f"[uptime_kuma_connector] alias map, {problem}")
+        _safe_log("warning", f"[uptime_kuma_connector] alias map, {problem}")
 
 
 # The retrieval phrasings live here rather than in the docstring, and the
@@ -409,7 +449,7 @@ def service_status(service_name: str, cat) -> str:
 
         api_key = resolve_api_key(settings)
         aliases = alias_map(settings)
-        log.info("[uptime_kuma_connector] requesting current monitor status.")
+        _safe_log("info", "[uptime_kuma_connector] requesting current monitor status.")
         payload = _fetch_metrics(
             settings,
             kuma_client.basic_auth_header(api_key),
@@ -434,7 +474,8 @@ def service_status(service_name: str, cat) -> str:
         # disk) must never fall through to the `except` below and discard an
         # answer that has already been determined.
         try:
-            log.info(
+            _safe_log(
+                "info",
                 "[uptime_kuma_connector] monitoring endpoint request succeeded "
                 f"(outcome: {outcome}, resolution: {resolution_source})."
             )
@@ -447,7 +488,8 @@ def service_status(service_name: str, cat) -> str:
         # an echoed credential. Its type, plus the HTTP status code when there
         # is one, gives operations enough to diagnose a failure without taking
         # that risk.
-        log.warning(
+        _safe_log(
+            "warning",
             "[uptime_kuma_connector] could not read the monitoring endpoint "
             f"({_describe_failure(failure)}); the status is unknown."
         )
@@ -468,7 +510,8 @@ def activated(plugin):
     of an administrator clicking a switch. The configuration is reported on the
     first turn that reads it instead.
     """
-    log.info(
+    _safe_log(
+        "info",
         "[uptime_kuma_connector] plugin activated. The service_status tool reads "
         "Uptime Kuma on demand; no flow hook or cache is used."
     )

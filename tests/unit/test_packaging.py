@@ -109,3 +109,11 @@ class TestBuild:
             pass
         else:
             raise AssertionError("build() should have raised FileNotFoundError")
+
+        metadata = package_plugin.json.loads(
+            (PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8")
+        )
+        expected_archive = tmp_path / (
+            f"{package_plugin.PLUGIN_NAME}-{metadata['version']}.zip"
+        )
+        assert not expected_archive.exists()

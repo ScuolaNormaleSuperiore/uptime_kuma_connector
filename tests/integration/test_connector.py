@@ -25,7 +25,7 @@ import sys
 import time
 from importlib import import_module
 from pathlib import Path
-from threading import Event
+from threading import BoundedSemaphore, Event
 
 import pytest
 from pydantic import ValidationError
@@ -110,6 +110,14 @@ class TestPluginLoads:
             connector.log.info = original
 
         assert any("plugin activated" in line for line in lines)
+
+    def test_activation_does_not_raise_when_logging_fails(self, monkeypatch):
+        def broken_log(_message):
+            raise RuntimeError("log sink unavailable")
+
+        monkeypatch.setattr(connector.log, "info", broken_log)
+
+        connector.activated.function(object())
 
     def test_an_internal_import_error_is_not_redirected_to_top_level_modules(
         self, tmp_path, monkeypatch
@@ -503,6 +511,22 @@ class TestServiceStatusBehaviour:
 
         assert sentence == connector.kuma_client.unreachable_sentence("VPN")
 
+    def test_a_logging_failure_on_the_error_path_does_not_escape(self, monkeypatch):
+        def unreachable(*_args, **_kwargs):
+            raise connector.httpx.ConnectError("connection refused")
+
+        def broken_log(_message):
+            raise RuntimeError("log sink unavailable")
+
+        monkeypatch.setattr(connector._http_client, "stream", unreachable)
+        monkeypatch.setattr(connector.log, "warning", broken_log)
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+
     def test_a_compressed_response_is_rejected_before_the_body_is_read(self, monkeypatch):
         body_read = False
 
@@ -558,6 +582,59 @@ class TestServiceStatusBehaviour:
         assert sentence == connector.kuma_client.unreachable_sentence("VPN")
         assert elapsed < 1.5
         assert any("MetricsRequestDeadlineExceeded" in line for line in lines)
+
+    def test_a_saturated_metrics_bulkhead_returns_unknown_without_new_io(
+        self, monkeypatch
+    ):
+        started = Event()
+        release = Event()
+        finished = Event()
+        calls = []
+
+        class BlockingResponse(FakeHttpResponse):
+            def iter_raw(self, chunk_size=None):
+                started.set()
+                release.wait(5)
+                finished.set()
+                yield from super().iter_raw(chunk_size)
+
+        def slow_stream(*_args, **_kwargs):
+            calls.append("slow")
+            return BlockingResponse(self.VALID_PAYLOAD)
+
+        monkeypatch.setattr(
+            connector, "_metrics_worker_slots", BoundedSemaphore(1)
+        )
+        monkeypatch.setattr(connector._http_client, "stream", slow_stream)
+
+        first = self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "request_timeout_seconds": 1,
+            }
+        )
+        assert started.is_set()
+        assert first == connector.kuma_client.unreachable_sentence("VPN")
+
+        second = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+        assert second == connector.kuma_client.unreachable_sentence("VPN")
+        assert calls == ["slow"]
+
+        release.set()
+        assert finished.wait(2)
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+
+        third = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+        assert third == "Il servizio VPN risulta attivo."
 
     def test_not_monitored_logs_at_most_three_close_names(self, monkeypatch):
         payload = "\n".join(
