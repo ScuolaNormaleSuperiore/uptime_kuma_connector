@@ -33,6 +33,16 @@ else:  # pragma: no cover - used by the repository's top-level test import
 
 BYTES_PER_KIBIBYTE = 1024
 
+# Reused across calls rather than opened and torn down per request. httpx's
+# own top-level functions (httpx.stream(), httpx.get(), ...) each create and
+# close a temporary client, paying a fresh TCP/TLS handshake on every single
+# call; httpx documents this and recommends a Client instance instead for
+# anything beyond a one-off script. A Client is documented as safe for
+# concurrent requests from multiple threads, which matches the worker-thread-
+# per-call shape below. It holds only a bounded connection pool — no per-turn
+# state, nothing that grows across calls.
+_http_client = httpx.Client()
+
 
 class MetricsResponseTooLarge(Exception):
     """The endpoint exceeded the configured in-memory response ceiling."""
@@ -50,7 +60,7 @@ def _read_metrics_stream(
     cancelled: Event,
 ) -> str:
     """Read one response incrementally, stopping before it exceeds its limit."""
-    with httpx.stream(
+    with _http_client.stream(
         "GET",
         url,
         headers={"Authorization": authorization},
@@ -407,11 +417,19 @@ def service_status(service_name: str, cat) -> str:
             if resolution.matches
             else "none"
         )
-        log.info(
-            "[uptime_kuma_connector] monitoring endpoint request succeeded "
-            f"(outcome: {outcome}, resolution: {resolution_source})."
-        )
-        _report_resolution_problems(resolution, names)
+        # `sentence` is already correct at this point. The two calls below are
+        # best-effort diagnostics for an administrator, not part of answering
+        # the question: a failure in either one (a log sink in timeout, a full
+        # disk) must never fall through to the `except` below and discard an
+        # answer that has already been determined.
+        try:
+            log.info(
+                "[uptime_kuma_connector] monitoring endpoint request succeeded "
+                f"(outcome: {outcome}, resolution: {resolution_source})."
+            )
+            _report_resolution_problems(resolution, names)
+        except Exception:
+            pass
         return sentence
     except Exception as failure:
         # The exception text may contain the URL, the Authorization header, or

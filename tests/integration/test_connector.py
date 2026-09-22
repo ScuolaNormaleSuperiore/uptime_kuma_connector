@@ -258,7 +258,7 @@ class TestServiceStatusBehaviour:
 
     def test_an_unconfigured_connector_makes_no_network_call(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(connector.httpx, "stream", lambda *args, **kwargs: calls.append(1))
+        monkeypatch.setattr(connector._http_client, "stream", lambda *args, **kwargs: calls.append(1))
 
         sentence = self.call({})
 
@@ -267,7 +267,7 @@ class TestServiceStatusBehaviour:
 
     def test_a_url_without_a_key_makes_no_network_call(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(connector.httpx, "stream", lambda *args, **kwargs: calls.append(1))
+        monkeypatch.setattr(connector._http_client, "stream", lambda *args, **kwargs: calls.append(1))
 
         sentence = self.call({"base_url": "https://kuma.example.org"})
 
@@ -281,7 +281,7 @@ class TestServiceStatusBehaviour:
         def unreachable(*_args, **_kwargs):
             raise connector.httpx.ConnectError("connection refused")
 
-        monkeypatch.setattr(connector.httpx, "stream", unreachable)
+        monkeypatch.setattr(connector._http_client, "stream", unreachable)
         monkeypatch.setattr(connector.log, "info", info_lines.append)
         monkeypatch.setattr(connector.log, "warning", warning_lines.append)
 
@@ -305,7 +305,7 @@ class TestServiceStatusBehaviour:
             "unauthorised", request=request, response=response
         )
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: FakeHttpResponse("", failure),
         )
@@ -337,7 +337,7 @@ class TestServiceStatusBehaviour:
             "moved", request=request, response=response
         )
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: FakeHttpResponse("", failure),
         )
@@ -355,7 +355,7 @@ class TestServiceStatusBehaviour:
         # A timeout or a DNS failure has no status code, and must still log.
         lines = []
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: FakeHttpResponse(
                 "", connector.httpx.ConnectError("unreachable")
@@ -378,7 +378,7 @@ class TestServiceStatusBehaviour:
             captured.update(kwargs)
             return FakeHttpResponse(self.VALID_PAYLOAD)
 
-        monkeypatch.setattr(connector.httpx, "stream", successful_stream)
+        monkeypatch.setattr(connector._http_client, "stream", successful_stream)
         monkeypatch.setattr(connector.log, "info", info_lines.append)
 
         sentence = self.call(
@@ -408,7 +408,7 @@ class TestServiceStatusBehaviour:
     def test_a_known_alias_is_identified_in_the_success_log(self, monkeypatch):
         lines = []
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
         )
@@ -427,11 +427,32 @@ class TestServiceStatusBehaviour:
         assert any("outcome: known, resolution: alias" in line for line in lines)
         assert not any("17" in line or "Accesso remoto" in line for line in lines)
 
+    def test_a_diagnostic_logging_failure_does_not_discard_a_known_answer(self, monkeypatch):
+        # The sentence is already correct once the endpoint answers. A failure
+        # in the best-effort diagnostics that follow (a log sink down, a full
+        # disk) must not discard it and fall back to `unknown`.
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+        monkeypatch.setattr(
+            connector,
+            "_report_resolution_problems",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("log sink down")),
+        )
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == "Il servizio VPN risulta attivo."
+
     def test_the_tool_never_raises_when_the_http_client_does(self, monkeypatch):
         def unexpected_failure(*_args, **_kwargs):
             raise RuntimeError("unexpected client failure")
 
-        monkeypatch.setattr(connector.httpx, "stream", unexpected_failure)
+        monkeypatch.setattr(connector._http_client, "stream", unexpected_failure)
 
         sentence = self.call(
             {"base_url": "https://kuma.example.org", "api_key": "read-key"}
@@ -442,7 +463,7 @@ class TestServiceStatusBehaviour:
     def test_an_oversized_declared_response_is_unknown(self, monkeypatch):
         lines = []
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: FakeHttpResponse(
                 "", headers={"content-length": str(64 * 1024 + 1)}
@@ -463,7 +484,7 @@ class TestServiceStatusBehaviour:
 
     def test_a_chunked_response_cannot_bypass_the_size_limit(self, monkeypatch):
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: FakeHttpResponse(
                 "", chunks=(b"a" * (32 * 1024), b"b" * (32 * 1024 + 1))
@@ -490,7 +511,7 @@ class TestServiceStatusBehaviour:
                 yield self.content
 
         monkeypatch.setattr(
-            connector.httpx,
+            connector._http_client,
             "stream",
             lambda *_args, **_kwargs: SlowResponse(self.VALID_PAYLOAD),
         )
@@ -520,7 +541,7 @@ class TestServiceStatusBehaviour:
         )
         lines = []
         monkeypatch.setattr(
-            connector.httpx, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+            connector._http_client, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
         )
         monkeypatch.setattr(connector.log, "warning", lines.append)
         connector._reported_configuration = None
@@ -544,7 +565,7 @@ class TestServiceStatusBehaviour:
         )
         lines = []
         monkeypatch.setattr(
-            connector.httpx, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+            connector._http_client, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
         )
         monkeypatch.setattr(connector.log, "warning", lines.append)
         connector._reported_configuration = None
@@ -558,6 +579,31 @@ class TestServiceStatusBehaviour:
         assert "Posta" in diagnostic
         assert "forged" not in diagnostic
         assert "internal.example" not in diagnostic
+
+
+class TestHttpClientReuse:
+    """A fresh httpx.Client per call would pay a TCP/TLS handshake on every
+    turn the tool is invoked; a module-level instance, reused, avoids it."""
+
+    def test_the_http_client_is_a_single_shared_instance(self, monkeypatch):
+        client_before = connector._http_client
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(
+                'monitor_status{monitor_id="17",monitor_name="VPN - GlobalProtect"} 1'
+            ),
+        )
+
+        connector.service_status.func(
+            "VPN", FakeCat({"base_url": "https://kuma.example.org", "api_key": "read-key"})
+        )
+        connector.service_status.func(
+            "VPN", FakeCat({"base_url": "https://kuma.example.org", "api_key": "read-key"})
+        )
+
+        assert connector._http_client is client_before
+        assert isinstance(connector._http_client, connector.httpx.Client)
 
 
 class TestTheInstanceUrlValidator:

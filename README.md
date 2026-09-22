@@ -103,10 +103,11 @@ adapter thin enough to read.
 been run against, declared in `plugin.json` as `min_cat_version`. The core
 reads that field into plugin metadata but never enforces it.
 
-`httpx` only, declared in `requirements.txt` with a permissive range. The
-core pins it exactly (`httpx==0.27.2`), but since the core checks only
-package presence, not version, a permissive declaration protects this plugin
-if another installed plugin ever moves it.
+`httpx` only, declared in `requirements.txt` with no version constraint. The
+plugin only uses long-stable httpx APIs (`Client`/`stream`,
+`raise_for_status`, `iter_bytes`, the `timeout` parameter), so no specific
+minimum is actually required — and since the core checks only package
+presence, never version, a declared minimum would not be enforced anyway.
 
 **`requirements.txt` carries no comments and no blank lines.** Cheshire Cat
 calls `packaging.Requirement()` on each line inside a `try` that abandons the
