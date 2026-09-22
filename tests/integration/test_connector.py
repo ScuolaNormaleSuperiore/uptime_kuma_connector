@@ -241,7 +241,8 @@ class FakeHttpResponse:
         if self.failure is not None:
             raise self.failure
 
-    def iter_bytes(self):
+    def iter_raw(self, chunk_size=None):
+        assert chunk_size == connector.RAW_RESPONSE_CHUNK_SIZE
         yield from self.chunks if self.chunks is not None else (self.content,)
 
 
@@ -397,6 +398,7 @@ class TestServiceStatusBehaviour:
         assert captured["headers"]["Authorization"] == (
             connector.kuma_client.basic_auth_header("read-key")
         )
+        assert captured["headers"]["Accept-Encoding"] == "identity"
         assert info_lines == [
             "[uptime_kuma_connector] requesting current monitor status.",
             "[uptime_kuma_connector] monitoring endpoint request succeeded "
@@ -501,12 +503,37 @@ class TestServiceStatusBehaviour:
 
         assert sentence == connector.kuma_client.unreachable_sentence("VPN")
 
+    def test_a_compressed_response_is_rejected_before_the_body_is_read(self, monkeypatch):
+        body_read = False
+
+        class CompressedResponse(FakeHttpResponse):
+            def iter_raw(self, chunk_size=None):
+                nonlocal body_read
+                body_read = True
+                yield from super().iter_raw(chunk_size)
+
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: CompressedResponse(
+                self.VALID_PAYLOAD, headers={"content-encoding": "gzip"}
+            ),
+        )
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert body_read is False
+
     def test_the_configured_timeout_bounds_the_complete_response(self, monkeypatch):
         release = Event()
         lines = []
 
         class SlowResponse(FakeHttpResponse):
-            def iter_bytes(self):
+            def iter_raw(self, chunk_size=None):
+                assert chunk_size == connector.RAW_RESPONSE_CHUNK_SIZE
                 release.wait(5)
                 yield self.content
 

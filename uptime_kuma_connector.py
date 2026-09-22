@@ -32,6 +32,7 @@ else:  # pragma: no cover - used by the repository's top-level test import
     from settings import SECURE_SCHEME, UptimeKumaConnectorSettings
 
 BYTES_PER_KIBIBYTE = 1024
+RAW_RESPONSE_CHUNK_SIZE = 64 * BYTES_PER_KIBIBYTE
 
 # Reused across calls rather than opened and torn down per request. httpx's
 # own top-level functions (httpx.stream(), httpx.get(), ...) each create and
@@ -63,10 +64,20 @@ def _read_metrics_stream(
     with _http_client.stream(
         "GET",
         url,
-        headers={"Authorization": authorization},
+        headers={"Authorization": authorization, "Accept-Encoding": "identity"},
         timeout=timeout_seconds,
     ) as response:
         response.raise_for_status()
+
+        # `iter_bytes()` transparently decompresses response content before the
+        # byte ceiling below can inspect it. A small compressed body can expand
+        # to an arbitrarily large allocation, so `/metrics` is deliberately
+        # accepted only as identity-encoded text. Kuma serves this endpoint
+        # uncompressed when requested this way; a proxy that ignores the request
+        # is an unreadable endpoint, not a reason to weaken the memory limit.
+        content_encoding = response.headers.get("content-encoding", "identity")
+        if content_encoding.strip().lower() != "identity":
+            raise MetricsResponseTooLarge
 
         declared_size = response.headers.get("content-length")
         if declared_size is not None:
@@ -79,7 +90,7 @@ def _read_metrics_stream(
                 pass
 
         payload = bytearray()
-        for chunk in response.iter_bytes():
+        for chunk in response.iter_raw(chunk_size=RAW_RESPONSE_CHUNK_SIZE):
             if cancelled.is_set():
                 raise MetricsRequestDeadlineExceeded
             if len(payload) + len(chunk) > maximum_bytes:

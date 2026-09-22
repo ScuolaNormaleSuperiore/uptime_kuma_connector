@@ -103,6 +103,10 @@ adapter thin enough to read.
 been run against, declared in `plugin.json` as `min_cat_version`. The core
 reads that field into plugin metadata but never enforces it.
 
+The manifest also pins `max_cat_version` to the same `1.9.2`: Cheshire Cat
+2.x is a major version this plugin has never been run against, and unlike a
+1.x point release its framework surface has no guarantee of staying the same.
+
 `httpx` only, declared in `requirements.txt` with no version constraint. The
 plugin only uses long-stable httpx APIs (`Client`/`stream`,
 `raise_for_status`, `iter_bytes`, the `timeout` parameter), so no specific
