@@ -109,7 +109,7 @@ The manifest also pins `max_cat_version` to the same `1.9.2`: Cheshire Cat
 
 `httpx` only, declared in `requirements.txt` with no version constraint. The
 plugin only uses long-stable httpx APIs (`Client`/`stream`,
-`raise_for_status`, `iter_bytes`, the `timeout` parameter), so no specific
+`raise_for_status`, `iter_raw`, the `timeout` parameter), so no specific
 minimum is actually required — and since the core checks only package
 presence, never version, a declared minimum would not be enforced anyway.
 
@@ -152,11 +152,15 @@ file, no restart.
 | **Uptime Kuma: URL istanza** | yes | empty | The instance base URL, without `/metrics`. Empty disables the connector |
 | **Uptime Kuma: API key** | yes | empty | A read-only key from the Uptime Kuma dashboard. Empty disables the connector |
 | **Uptime Kuma: mappa alias** | no | empty | Maps what users say to monitor ids, one entry per line |
-| **Uptime Kuma: risposta massima (KiB)** | no | 1024 | Rejects a `/metrics` response above this size; range 64–10240 |
+| **Uptime Kuma: risposta massima (KiB)** | no | 1024 | Rejects an identity-encoded `/metrics` response above this size; range 64–10240 |
 | **Uptime Kuma: timeout (secondi)** | no | 2 | Bounds the complete request, not each socket operation; range 1–10 |
 
 Labels are in Italian because that is what the admin panel shows. **The
 connector is enabled only when the URL and the key are both filled in.**
+
+The connector requests an uncompressed response; a proxy that returns another
+content encoding yields `unknown`. At most four requests run at once; further
+calls also return `unknown` immediately.
 
 ### Uptime Kuma: URL istanza
 
