@@ -437,6 +437,68 @@ class TestServiceStatusBehaviour:
         assert any("outcome: known, resolution: alias" in line for line in lines)
         assert not any("17" in line or "Accesso remoto" in line for line in lines)
 
+    def test_a_broken_alias_is_reported_once_per_configuration(self, monkeypatch):
+        # A standing broken alias is a fixed configuration fault: every call
+        # that resolves through it reproduces the identical warning, which is
+        # repetition, not new information, across any number of turns.
+        lines = []
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+        connector._reported_missing_alias_ids.clear()
+
+        stored = {
+            "base_url": "https://kuma.example.org",
+            "api_key": "read-key",
+            "alias_map": "VPN: 99",
+        }
+        self.call(stored, "VPN")
+        self.call(stored, "VPN")
+        self.call(stored, "VPN")
+
+        diagnostics = [line for line in lines if "absent from /metrics" in line]
+        assert len(diagnostics) == 1
+
+    def test_a_broken_alias_is_reported_again_after_the_configuration_changes(
+        self, monkeypatch
+    ):
+        # The memoisation must not survive a fix: a different broken alias
+        # (or the same alias broken a different way) after a configuration
+        # change is new information and must be reported again.
+        lines = []
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+        monkeypatch.setattr(connector.log, "warning", lines.append)
+        connector._reported_configuration = None
+        connector._reported_missing_alias_ids.clear()
+
+        self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "alias_map": "VPN: 99",
+            },
+            "VPN",
+        )
+        self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "alias_map": "VPN: 98",
+            },
+            "VPN",
+        )
+
+        diagnostics = [line for line in lines if "absent from /metrics" in line]
+        assert len(diagnostics) == 2
+
     def test_a_diagnostic_logging_failure_does_not_discard_a_known_answer(self, monkeypatch):
         # The sentence is already correct once the endpoint answers. A failure
         # in the best-effort diagnostics that follow (a log sink down, a full
@@ -636,6 +698,62 @@ class TestServiceStatusBehaviour:
         )
         assert third == "Il servizio VPN risulta attivo."
 
+    def test_a_hang_before_connecting_releases_its_slot_at_the_deadline(
+        self, monkeypatch
+    ):
+        """A worker stuck before a connection is even established (the
+        name-resolution/TCP-connect phase, which httpx's own `timeout` does
+        not bound the way it bounds socket reads) must not permanently
+        occupy its bulkhead slot. Capacity must return as soon as this call's
+        own deadline elapses, not only if and when the abandoned thread
+        eventually terminates. This is distinct from
+        `test_a_saturated_metrics_bulkhead_returns_unknown_without_new_io`,
+        where the worker has already connected and is only slow reading the
+        body: that slot must stay held so a second call does not pile a new
+        connection on top of one still doing real work.
+        """
+        release = Event()
+        payload = self.VALID_PAYLOAD
+
+        class HangingConnect:
+            def __enter__(self):
+                release.wait(5)
+                return FakeHttpResponse(payload)
+
+            def __exit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(
+            connector, "_metrics_worker_slots", BoundedSemaphore(1)
+        )
+        monkeypatch.setattr(
+            connector._http_client, "stream", lambda *_args, **_kwargs: HangingConnect()
+        )
+
+        first = self.call(
+            {
+                "base_url": "https://kuma.example.org",
+                "api_key": "read-key",
+                "request_timeout_seconds": 1,
+            }
+        )
+        assert first == connector.kuma_client.unreachable_sentence("VPN")
+
+        # The first worker is still hanging inside `__enter__`, never having
+        # connected — but its slot must already be free: a second call must
+        # acquire it immediately instead of being rejected as over capacity.
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+        second = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+        assert second == "Il servizio VPN risulta attivo."
+
+        release.set()
+
     def test_not_monitored_logs_at_most_three_close_names(self, monkeypatch):
         payload = "\n".join(
             f'monitor_status{{monitor_id="{number}",monitor_name="{name}"}} 1'
@@ -659,7 +777,36 @@ class TestServiceStatusBehaviour:
         diagnostic = next(line for line in lines if "Closest monitor names" in line)
         assert diagnostic.count(",") == 2
 
-    def test_unsafe_monitor_names_never_reach_diagnostic_logs(self, monkeypatch):
+    def test_a_url_shaped_monitor_name_resolves_instead_of_not_monitored(
+        self, monkeypatch
+    ):
+        # The end-to-end version of the parser-level regression: a monitor an
+        # admin never renamed away from its default URL-shaped display name
+        # must answer `known`, not the false certainty of `not_monitored`.
+        payload = (
+            'monitor_status{monitor_id="9",monitor_name="https://portale.example.org"} 1'
+        )
+        monkeypatch.setattr(
+            connector._http_client, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+        )
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"},
+            "https://portale.example.org",
+        )
+
+        assert sentence == "Il servizio https://portale.example.org risulta attivo."
+
+    def test_only_structurally_unsafe_monitor_names_are_kept_from_diagnostic_logs(
+        self, monkeypatch
+    ):
+        # A URL-shaped name is a normal, expected monitor name (Uptime Kuma
+        # itself defaults an HTTP(S) monitor's display name to its URL until
+        # renamed) and does reach the administrator-only log like any other
+        # real name. Only names that are structurally unsafe to retain at all
+        # — here, one carrying a forged control character — never reach it,
+        # because `parse_monitor_metrics()` drops them before this log line
+        # ever sees them. See ISSUES_RESOLVED.md, 2026-09-23.
         payload = "\n".join(
             (
                 r'monitor_status{monitor_id="1",monitor_name="VPN\n[forged]"} 1',
@@ -681,8 +828,8 @@ class TestServiceStatusBehaviour:
 
         diagnostic = next(line for line in lines if "Closest monitor names" in line)
         assert "Posta" in diagnostic
+        assert "https://internal.example" in diagnostic
         assert "forged" not in diagnostic
-        assert "internal.example" not in diagnostic
 
 
 class TestHttpClientReuse:
@@ -885,6 +1032,40 @@ class TestLoadSettingsNeverRaises:
 
         assert settings.base_url == ""
         assert connector.is_usable(settings) is False
+
+    def test_an_invalid_unrelated_field_does_not_disable_a_valid_url_and_key(self):
+        # A field with no relation to base_url/api_key (here, a numeric range
+        # violation) must not wipe out an otherwise valid, working
+        # configuration: only that one field falls back to its default.
+        settings = connector.load_settings(
+            FakeCat(
+                {
+                    "base_url": "https://kuma.example.org",
+                    "api_key": "read-key",
+                    "request_timeout_seconds": 15,
+                }
+            )
+        )
+
+        assert settings.base_url == "https://kuma.example.org"
+        assert settings.api_key == "read-key"
+        assert settings.request_timeout_seconds == 2.0
+        assert connector.is_usable(settings) is True
+
+    def test_several_invalid_fields_all_fall_back_while_the_rest_survives(self):
+        settings = connector.load_settings(
+            FakeCat(
+                {
+                    "base_url": "https://kuma.example.org",
+                    "maximum_response_size_kib": 1,
+                    "request_timeout_seconds": 99,
+                }
+            )
+        )
+
+        assert settings.base_url == "https://kuma.example.org"
+        assert settings.maximum_response_size_kib == 1024
+        assert settings.request_timeout_seconds == 2.0
 
     def test_a_failure_reading_the_settings_disables_the_connector(self):
         settings = connector.load_settings(FakeCat(RuntimeError("no plugin")))

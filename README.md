@@ -51,8 +51,12 @@ alias map. The plugin resolves it, in order:
 Comparisons are case-insensitive, whitespace-collapsed, and read `-`, `.` and
 `_` both as separators and as noise to remove — so `Portale-XX` matches
 `Portale XX`, and `UGOV` matches `U-GOV - Autenticazione` with no alias
-needed. Alias keys are folded the same way, but matching stays exact after
-normalisation: `Portale Demo` never reaches `Portale Demo Test`.
+needed. A leading `http://` or `https://` is also ignored on every side of a
+comparison — `www.sns.it` in the alias map matches `www.sns.it`,
+`https://www.sns.it`, or `http://www.sns.it` in the question equally; `www.`
+itself is kept, only the scheme is noise. Alias keys are folded the same way,
+but matching stays exact after normalisation: `Portale Demo` never reaches
+`Portale Demo Test`.
 
 Several matches are all reported, each with its own state, under neutral
 ordinal labels (`controllo 1`, `controllo 2`, …) — external monitor names
@@ -61,8 +65,10 @@ never reach the model, only the log.
 Bounds that keep untrusted text out of the answer and the log:
 
 - a requested name is truncated to 80 characters;
-- a monitor name over 160 characters, or containing control characters or
-  something URL-shaped, is ignored;
+- a monitor name over 160 characters, or containing control or formatting
+  characters, is ignored — a URL-shaped name is not: Uptime Kuma defaults an
+  HTTP(S) monitor's display name to its URL until renamed, and that is an
+  ordinary name, not unsafe text;
 - containment by substring needs at least three characters on both sides;
   shorter queries need a whole-word match;
 - a monitor name that normalises to nothing is never matched heuristically
@@ -206,10 +212,12 @@ Blank lines and `#` comments are ignored. The id is the number in the
 monitor's URL, `/dashboard/<id>`.
 
 One alias may group up to ten monitor ids (an ordinary name match is capped
-at five). A malformed line is discarded on its own — never disables the
-field — and logged; a repeated id on one line collapses to one; a
-conflicting alias keeps its first definition. Read the log when an alias
-does not work: the panel accepts the field either way.
+at five) — past that, the field still saves, but that alias will always
+resolve as `ambiguous`, and a save/reload logs why. A malformed line is
+discarded on its own — never disables the field — and logged; a repeated id
+on one line collapses to one; a conflicting alias keeps its first
+definition. Read the log when an alias does not work: the panel accepts the
+field either way.
 
 ### What is deliberately not configurable
 

@@ -18,11 +18,12 @@ between turns: the status is read when the question arrives.
 
 from difflib import SequenceMatcher
 from queue import Queue
-from threading import BoundedSemaphore, Event, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 
 import httpx
 from cat.log import log
 from cat.mad_hatter.decorators import plugin, tool
+from pydantic import ValidationError
 
 if __package__:
     from . import kuma_client
@@ -84,14 +85,24 @@ def _read_metrics_stream(
     timeout_seconds: float,
     maximum_bytes: int,
     cancelled: Event,
+    connected: Event,
 ) -> str:
-    """Read one response incrementally, stopping before it exceeds its limit."""
+    """Read one response incrementally, stopping before it exceeds its limit.
+
+    `connected` is set the moment a response object exists, i.e. once name
+    resolution and the TCP/TLS connect have both completed. Nothing before
+    this point is bounded by `timeout_seconds`: httpx's `timeout` covers
+    socket reads/writes/pool waits, not the stdlib's own `getaddrinfo()`
+    call, which has no timeout of its own. The caller uses `connected` to
+    tell that unbounded phase apart from a slow-but-connected response body.
+    """
     with _http_client.stream(
         "GET",
         url,
         headers={"Authorization": authorization, "Accept-Encoding": "identity"},
         timeout=timeout_seconds,
     ) as response:
+        connected.set()
         response.raise_for_status()
 
         # `iter_bytes()` transparently decompresses response content before the
@@ -150,12 +161,34 @@ def _fetch_metrics(
     response. The daemon worker lets the calling conversation stop at the
     configured total deadline as well. Cancellation is observed between chunks;
     an in-progress socket operation remains bounded by the same httpx timeout.
+
+    Name resolution has no timeout of its own (see `_read_metrics_stream`), so
+    a worker can still be alive when the deadline above elapses. Its bulkhead
+    slot (`_metrics_worker_slots`) is reclaimed immediately in that case
+    rather than left held until the abandoned thread eventually finishes, or
+    never does — otherwise a handful of unlucky lookups would permanently
+    starve every later call. A worker that had already connected and is only
+    slow reading the body keeps its slot until it actually finishes: that
+    thread is doing real work against the instance, and a fresh call must not
+    pile a second connection on top of it. `release_slot_once()` guards
+    against the two sides racing to release the same slot twice.
     """
     if not _metrics_worker_slots.acquire(blocking=False):
         raise MetricsRequestCapacityExceeded
 
     result: Queue = Queue(maxsize=1)
     cancelled = Event()
+    connected = Event()
+    release_lock = Lock()
+    released = False
+
+    def release_slot_once() -> None:
+        nonlocal released
+        with release_lock:
+            if released:
+                return
+            released = True
+        _metrics_worker_slots.release()
 
     def fetch() -> None:
         try:
@@ -165,22 +198,25 @@ def _fetch_metrics(
                 settings.request_timeout_seconds,
                 settings.maximum_response_size_kib * BYTES_PER_KIBIBYTE,
                 cancelled,
+                connected,
             )
             result.put((True, payload))
         except Exception as failure:
             result.put((False, failure))
         finally:
-            _metrics_worker_slots.release()
+            release_slot_once()
 
     worker = Thread(target=fetch, daemon=True, name="uptime-kuma-metrics")
     try:
         worker.start()
     except Exception:
-        _metrics_worker_slots.release()
+        release_slot_once()
         raise
     worker.join(settings.request_timeout_seconds)
     if worker.is_alive():
         cancelled.set()
+        if not connected.is_set():
+            release_slot_once()
         raise MetricsRequestDeadlineExceeded
 
     succeeded, value = result.get_nowait()
@@ -226,13 +262,42 @@ def load_settings(cat) -> UptimeKumaConnectorSettings:
         )
         return UptimeKumaConnectorSettings()
 
+    stored = dict(stored or {})
     try:
-        settings = UptimeKumaConnectorSettings(**(stored or {}))
-    except Exception as failure:
+        settings = UptimeKumaConnectorSettings(**stored)
+    except ValidationError as failure:
         # Reachable when settings.json was edited by hand or written by an
-        # older version of the model: the strict base_url validator refuses it
-        # on read as it would on save. Disabling the connector is the safe
-        # answer; raising here would break a conversation over a typo.
+        # older/newer version of the model: e.g. the strict base_url
+        # validator refuses a value on read as it would on save, or a
+        # numeric field's range changed. Pydantic validates every field and
+        # reports every failure in one exception, so only the fields it
+        # actually rejected are dropped back to their default — a stored
+        # value in one field must never disable an unrelated, valid one.
+        invalid_fields = sorted(
+            {str(error["loc"][0]) for error in failure.errors() if error.get("loc")}
+        )
+        for field in invalid_fields:
+            stored.pop(field, None)
+        _safe_log(
+            "warning",
+            "[uptime_kuma_connector] ignoring invalid stored setting(s): "
+            f"{', '.join(invalid_fields) or type(failure).__name__}; using "
+            "their defaults, keeping the rest."
+        )
+        try:
+            settings = UptimeKumaConnectorSettings(**stored)
+        except Exception as failure:  # pragma: no cover - defensive only
+            # Not expected: the fields removed above were the only ones
+            # pydantic rejected. Kept as a last resort so a configuration
+            # problem can never take the turn down.
+            _safe_log(
+                "warning",
+                "[uptime_kuma_connector] the stored settings are still not "
+                f"valid after dropping the rejected field(s) "
+                f"({type(failure).__name__}); the connector stays disabled."
+            )
+            return UptimeKumaConnectorSettings()
+    except Exception as failure:
         _safe_log(
             "warning",
             "[uptime_kuma_connector] the stored settings are not valid "
@@ -292,17 +357,29 @@ def _report_resolution_problems(
     needs the same resolution to build the sentence, and re-parsing `/metrics`
     and re-resolving the request here just to log would cost that work twice
     on every single call.
+
+    The two branches below are not throttled the same way. A missing alias id
+    is a standing configuration fault, deterministic until an admin fixes it:
+    every request that resolves through that alias reproduces the identical
+    warning, which is pure repetition rather than new information, so it is
+    memoised on `missing_alias_ids` — see `_reported_missing_alias_ids`. A
+    "no monitor matches" request carries no such repeated identity: different
+    turns typically name different, unrelated services, and each is its own
+    actionable signal about a gap an admin might want to close — logging it
+    every time is not noise, so it stays unthrottled.
     """
     if resolution.missing_alias_ids:
-        missing = ", ".join(
-            str(monitor_id) for monitor_id in resolution.missing_alias_ids
-        )
-        _safe_log(
-            "warning",
-            "[uptime_kuma_connector] alias "
-            f"'{resolution.requested_name}' refers to monitor ids absent from "
-            f"/metrics: {missing}."
-        )
+        if resolution.missing_alias_ids not in _reported_missing_alias_ids:
+            _reported_missing_alias_ids.add(resolution.missing_alias_ids)
+            missing = ", ".join(
+                str(monitor_id) for monitor_id in resolution.missing_alias_ids
+            )
+            _safe_log(
+                "warning",
+                "[uptime_kuma_connector] alias "
+                f"'{resolution.requested_name}' refers to monitor ids absent "
+                f"from /metrics: {missing}."
+            )
 
     if not resolution.matches and not resolution.used_alias:
         closest = _closest_monitor_names(
@@ -321,6 +398,12 @@ def _report_resolution_problems(
 # rather than on every turn. Module state resets when the core reloads the
 # plugin, which is the moment a fresh report is wanted anyway.
 _reported_configuration = None
+
+# Which broken-alias id sets `_report_resolution_problems()` has already
+# logged. Cleared whenever the configuration signature above changes, so an
+# alias fixed and later broken again in a different way is reported afresh —
+# see `report_configuration_problems()`.
+_reported_missing_alias_ids: set[tuple[int, ...]] = set()
 
 
 def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None:
@@ -351,6 +434,7 @@ def report_configuration_problems(settings: UptimeKumaConnectorSettings) -> None
     if signature == _reported_configuration:
         return
     _reported_configuration = signature
+    _reported_missing_alias_ids.clear()
 
     if settings.base_url and not settings.base_url.lower().startswith(
         f"{SECURE_SCHEME}:"

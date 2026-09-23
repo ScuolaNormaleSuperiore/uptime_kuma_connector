@@ -139,6 +139,27 @@ class TestNormaliseName:
         assert kuma_client.normalise_name("") == ""
         assert kuma_client.normalise_name(None) == ""
 
+    def test_an_http_or_https_scheme_does_not_matter(self):
+        # An alias, a request, or a monitor's own display name should be able
+        # to spell "www.sns.it" with or without a scheme and still compare
+        # equal — an admin writing the alias map should not have to guess or
+        # enumerate which form a user, or Uptime Kuma itself, will use.
+        bare = kuma_client.normalise_name("www.sns.it")
+        assert kuma_client.normalise_name("https://www.sns.it") == bare
+        assert kuma_client.normalise_name("http://www.sns.it") == bare
+        assert kuma_client.normalise_name("HTTPS://www.sns.it") == bare
+
+        fused_bare = kuma_client.fuse_name("www.sns.it")
+        assert kuma_client.fuse_name("https://www.sns.it") == fused_bare
+        assert kuma_client.fuse_name("http://www.sns.it") == fused_bare
+
+    def test_www_itself_is_kept_unlike_the_scheme(self):
+        # Only the scheme is noise; "www." is part of the name an admin
+        # actually writes and must not be stripped along with it.
+        assert kuma_client.normalise_name("www.sns.it") != kuma_client.normalise_name(
+            "sns.it"
+        )
+
 
 class TestParseAliasMap:
     """The admin panel's alias map."""
@@ -214,6 +235,25 @@ class TestParseAliasMap:
         assert aliases == {}
         assert len(problems) == 1
 
+    def test_a_signed_id_is_flagged_rather_than_silently_negative(self):
+        # int() alone accepts a leading sign; a monitor id from /metrics never
+        # carries one, so "-12" is a typo, not a legitimate negative id.
+        aliases, problems = kuma_client.parse_alias_map("VPN: -12")
+
+        assert aliases == {}
+        assert len(problems) == 1
+        assert "-12" in problems[0]
+
+    def test_an_underscore_separated_id_is_flagged_not_silently_reinterpreted(self):
+        # int() alone accepts PEP-515 underscore digit separators; "1_2"
+        # silently becoming id 12 could misroute an alias to an unrelated
+        # real monitor with no warning at all.
+        aliases, problems = kuma_client.parse_alias_map("VPN: 1_2")
+
+        assert aliases == {}
+        assert len(problems) == 1
+        assert "1_2" in problems[0]
+
     def test_a_conflicting_duplicate_keeps_the_first_and_is_reported(self):
         aliases, problems = kuma_client.parse_alias_map("VPN: 17\nVPN: 99")
 
@@ -231,6 +271,24 @@ class TestParseAliasMap:
         # The shipped default. It must not produce a single log line.
         assert kuma_client.parse_alias_map("") == ({}, ())
         assert kuma_client.parse_alias_map(None) == ({}, ())
+
+    def test_an_alias_over_the_ceiling_is_kept_but_flagged(self):
+        # Never refused, matching every other tolerance in this function —
+        # but past MAXIMUM_ALIAS_MATCHES, describe_resolution() always
+        # answers `ambiguous` for it, silently unless this warns about it.
+        ids = ",".join(str(n) for n in range(1, 12))  # 11 ids
+        aliases, problems = kuma_client.parse_alias_map(f"Piattaforma: {ids}")
+
+        assert aliases == {"piattaforma": tuple(range(1, 12))}
+        assert len(problems) == 1
+        assert "11 ids" in problems[0]
+        assert "ambiguous" in problems[0]
+
+    def test_an_alias_at_the_ceiling_is_not_flagged(self):
+        ids = ",".join(str(n) for n in range(1, 11))  # exactly 10 ids
+        _, problems = kuma_client.parse_alias_map(f"Piattaforma: {ids}")
+
+        assert problems == ()
 
 
 class TestMetricsUrl:
@@ -355,7 +413,6 @@ class TestParseMonitorMetrics:
             (
                 r'monitor_status{monitor_id="1",monitor_name="VPN\n[forged]"} 1',
                 'monitor_status{monitor_id="2",monitor_name="VPN\u2028forged"} 1',
-                'monitor_status{monitor_id="3",monitor_name="https://internal.example"} 1',
                 f'monitor_status{{monitor_id="4",monitor_name="{"A" * 161}"}} 1',
                 'monitor_status{monitor_id="5",monitor_name="Università — Città"} 1',
             )
@@ -364,6 +421,18 @@ class TestParseMonitorMetrics:
         assert kuma_client.parse_monitor_metrics(payload) == (
             {5: "Università — Città"},
             {5: kuma_client.STATUS_UP},
+        )
+
+    def test_a_url_shaped_monitor_name_is_kept_and_resolvable(self):
+        # Uptime Kuma defaults an HTTP(S) monitor's display name to the
+        # monitored URL until an admin renames it: a genuinely monitored
+        # service must stay findable, not disappear into a false
+        # `not_monitored`. See ISSUES_RESOLVED.md, 2026-09-23.
+        payload = 'monitor_status{monitor_id="3",monitor_name="https://internal.example"} 1'
+
+        assert kuma_client.parse_monitor_metrics(payload) == (
+            {3: "https://internal.example"},
+            {3: kuma_client.STATUS_UP},
         )
 
 
@@ -384,12 +453,62 @@ class TestFindMonitor:
         assert resolution.matches == ((12, "U-GOV"),)
         assert not resolution.used_alias
 
+    def test_an_alias_written_without_a_scheme_matches_a_request_with_one(self):
+        # The exact scenario an admin wrote only "www.sns.it" in the alias
+        # map for: the question may or may not spell out http(s)://, and the
+        # real monitor's own display name may differ from either.
+        names = {42: "Sito istituzionale SNS"}
+        aliases, _ = kuma_client.parse_alias_map("www.sns.it: 42")
+
+        for query in ("www.sns.it", "https://www.sns.it", "http://www.sns.it"):
+            resolution = kuma_client.find_monitor(names, query, aliases)
+            assert resolution.used_alias, query
+            assert resolution.matches == ((42, "Sito istituzionale SNS"),), query
+
     def test_normalisation_and_containment_find_a_monitor(self):
         resolution = kuma_client.find_monitor(
             {13: "U-GOV - Autenticazione Cineca"}, "autenticazione UGOV"
         )
 
         assert resolution.matches == ((13, "U-GOV - Autenticazione Cineca"),)
+
+    def test_containment_fallback_normalises_each_monitor_only_once(self, monkeypatch):
+        # Regression for the 2026-09-22 performance finding: the containment
+        # fallback used to recompute normalise_name()/fuse_name() a second
+        # time for every monitor already normalised in the preceding
+        # exact-match pass, doubling the cost of the call for no reason. A
+        # small constant overhead beyond one call per monitor is expected —
+        # the requested name itself is normalised a couple of times on its
+        # own side — so the bound checked here is the one the old code
+        # actually broke: well under twice the number of monitors.
+        calls = {"normalise_name": 0, "fuse_name": 0}
+        real_normalise_name = kuma_client.normalise_name
+        real_fuse_name = kuma_client.fuse_name
+
+        def counting_normalise_name(value):
+            calls["normalise_name"] += 1
+            return real_normalise_name(value)
+
+        def counting_fuse_name(value):
+            calls["fuse_name"] += 1
+            return real_fuse_name(value)
+
+        monkeypatch.setattr(kuma_client, "normalise_name", counting_normalise_name)
+        monkeypatch.setattr(kuma_client, "fuse_name", counting_fuse_name)
+
+        # A phrase-style query only containment can satisfy, so the
+        # exact-match pass fails and the fallback actually runs. Matches both
+        # "U-GOV" (fused "ugov" is a subset match) and its more specific
+        # sibling — the fallback running over the whole fixture, not a
+        # single-monitor slice, is what makes the call count meaningful.
+        resolution = kuma_client.find_monitor(self.NAMES, "autenticazione UGOV")
+
+        assert resolution.matches == (
+            (12, "U-GOV"),
+            (13, "U-GOV - Autenticazione Cineca"),
+        )
+        assert calls["normalise_name"] < 2 * len(self.NAMES)
+        assert calls["fuse_name"] < 2 * len(self.NAMES)
 
     def test_a_separator_in_the_query_still_finds_the_spaced_monitor(self):
         # The defect this pair of forms was introduced for. Written with a
@@ -517,6 +636,20 @@ class TestFindMonitor:
 
         assert "\n" not in resolution.requested_name
         assert resolution.requested_name == "VPN [uptime-kuma] fake log line"
+
+    def test_unicode_line_separators_and_overrides_are_stripped_too(self):
+        # Not covered by the ASCII control-character check: U+2028 (line
+        # separator, which this file itself treats as a line boundary via
+        # str.splitlines() elsewhere) and U+202E (right-to-left override) are
+        # Unicode format/separator characters, not ASCII controls, and must
+        # be neutralised the same way a literal newline already is.
+        resolution = kuma_client.find_monitor(
+            self.NAMES, "VPN [forged]‮reversed"
+        )
+
+        assert " " not in resolution.requested_name
+        assert "‮" not in resolution.requested_name
+        assert resolution.requested_name == "VPN [forged] reversed"
 
 
 class TestMonitoredServiceNames:

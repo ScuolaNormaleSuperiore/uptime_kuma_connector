@@ -72,16 +72,29 @@ MINIMUM_CONTAINMENT_LENGTH = 3
 _SEPARATOR_CHARACTERS = str.maketrans("-._", "   ")
 _REMOVED_SEPARATORS = str.maketrans("", "", "-._")
 
-# This text comes from the model and reaches both a sentence for the user and
-# `log.warning()` calls in the adapter, verbatim. Stripped rather than merely
-# truncated, so a newline in a crafted service name cannot forge what looks
-# like a second, unrelated log line.
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+# An `http(s)://` scheme carries no identity a user, an alias, or a monitor's
+# own display name would rely on to tell one service from another — it is
+# noise every comparison should ignore, the same way a separator's exact
+# spelling already is. Deliberately narrower than "any scheme": stripping only
+# http/https keeps this predictable rather than guessing at what else might
+# look like one. `www.` is left alone — unlike the scheme, it is part of the
+# name an admin actually writes in the alias map.
+_URL_SCHEME = re.compile(r"\bhttps?://", re.I)
 
-# A monitor name is never expected to be a URL. Schemes are matched generally
-# rather than enumerating http/https so uncommon URL forms cannot bypass the
-# boundary check.
-_URL_IN_MONITOR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|\bwww\.", re.I)
+# Unicode controls (newlines included), format characters (bidirectional
+# overrides among them), lone surrogates, and line/paragraph separators. A
+# character in one of these categories could forge what looks like a second,
+# unrelated log line, or scramble how text displays. Shared by every boundary
+# that neutralises external text — model input and monitor names alike —
+# rather than each re-deriving its own notion of "unsafe".
+_UNSAFE_TEXT_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}
+
+# A monitor id, as `/metrics` emits it, is a plain non-negative decimal
+# integer. `int()` alone would also accept a leading sign and PEP-515
+# underscore digit separators ("-12", "1_2"), silently turning a typo in
+# `alias_map` into an id that can never match, or worse, one that matches an
+# unrelated real monitor, with no warning either way.
+_PLAIN_MONITOR_ID = re.compile(r"[0-9]+")
 
 # Prometheus label names are identifiers and label values may escape a quote,
 # backslash, or newline. Parsing labels separately avoids coupling the monitor
@@ -114,14 +127,18 @@ def normalise_name(value: str) -> str:
     Applied to all three sides — what the user asked, the monitor names, and the
     alias keys — so they are always compared in the same shape.
 
-    The order is load-bearing: the separators go first, because turning those
-    in "U-GOV - Autenticazione" into spaces leaves runs of whitespace that the
-    next pass then has to collapse.
+    The order is load-bearing: the scheme, if any, goes first — it shares no
+    characters with the separators below, but stripping it before splitting
+    on whitespace keeps the reasoning in one direction instead of two. The
+    separators go next, because turning those in "U-GOV - Autenticazione"
+    into spaces leaves runs of whitespace that the next pass then has to
+    collapse.
 
     This is the word-separated form. `fuse_name()` builds the other one, and
     a comparison that uses only this one misses "UGOV" against "U-GOV".
     """
-    separated = str(value or "").translate(_SEPARATOR_CHARACTERS)
+    text = _URL_SCHEME.sub("", str(value or ""))
+    separated = text.translate(_SEPARATOR_CHARACTERS)
     return " ".join(separated.split()).casefold()
 
 
@@ -137,8 +154,14 @@ def fuse_name(value: str) -> str:
     cannot: this one joins an acronym split by hyphens, the other separates
     words joined by them. Comparing both is what makes "Portale-XX" and
     "Portale XX" the same service without losing "UGOV".
+
+    The scheme is stripped here too, for the same reason as in
+    `normalise_name()`: an alias written as `www.sns.it` must equal a request
+    or a monitor name spelled `https://www.sns.it`, on both normalised forms,
+    not just one of them.
     """
-    without_separators = str(value or "").translate(_REMOVED_SEPARATORS)
+    text = _URL_SCHEME.sub("", str(value or ""))
+    without_separators = text.translate(_REMOVED_SEPARATORS)
     return " ".join(without_separators.split()).casefold()
 
 
@@ -206,11 +229,10 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
             candidate = part.strip()
             if not candidate:
                 continue
-            try:
-                monitor_ids.append(int(candidate))
-            except ValueError:
+            if not _PLAIN_MONITOR_ID.fullmatch(candidate):
                 malformed_id = candidate
                 break
+            monitor_ids.append(int(candidate))
 
         # One bad id discards the line rather than half of it: a partially
         # applied alias would answer about some components of a service and stay
@@ -228,6 +250,18 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
         # clause in the sentence, or trip the ambiguous-match ceiling for what
         # is really one monitor.
         monitor_ids = list(dict.fromkeys(monitor_ids))
+
+        # The alias itself is never refused for this — an over-long line is
+        # still saved as written, matching every other tolerance in this
+        # function — but past this many ids `describe_resolution()` always
+        # answers `ambiguous` for it (see MAXIMUM_ALIAS_MATCHES), which is
+        # otherwise silent and looks like a working alias that never resolves.
+        if len(monitor_ids) > MAXIMUM_ALIAS_MATCHES:
+            problems.append(
+                f"line {number}: alias groups {len(monitor_ids)} ids, more "
+                f"than the {MAXIMUM_ALIAS_MATCHES} ever reported together; "
+                "it will always resolve as ambiguous"
+            )
 
         for name in names:
             existing = aliases.get(name)
@@ -375,17 +409,22 @@ def _is_safe_monitor_name(value: str) -> bool:
     """Accept external monitor text only when it is safe to retain and log.
 
     Unicode controls and format characters include newlines, bidirectional
-    overrides and invisible separators. Dropping the whole metric is safer
-    than silently changing its identity and accidentally matching a different
-    service. URLs and excessive text have no legitimate role in a monitor
-    name and are rejected at the same boundary.
+    overrides and invisible separators: a name carrying them could forge what
+    looks like a second, unrelated log line, or change identity in a way that
+    accidentally matches a different service. Dropping the whole metric is
+    safer than silently rewriting it. Excessive length is rejected on the same
+    ground. A URL-shaped name is not: Uptime Kuma itself defaults an HTTP(S)
+    monitor's display name to the monitored URL until an admin renames it, so
+    treating that shape as unsafe made an actively monitored, unrenamed
+    service falsely report `not_monitored` — see `ISSUES_RESOLVED.md`,
+    2026-09-23. Real monitor names, URL-shaped or not, already reach the log
+    for an administrator by design; only the two structural risks above are
+    filtered here.
     """
     if not value or len(value) > MAXIMUM_MONITOR_NAME_LENGTH:
         return False
-    if _URL_IN_MONITOR_NAME.search(value):
-        return False
     return not any(
-        unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+        unicodedata.category(character) in _UNSAFE_TEXT_CATEGORIES
         for character in value
     )
 
@@ -427,20 +466,29 @@ def find_monitor(
         return MonitorResolution(requested_name, matches, True, missing_ids)
 
     fused_wanted = fuse_name(requested_name)
-    exact_matches = tuple(
-        (monitor_id, name)
+
+    # Computed once per monitor and reused by both passes below, rather than
+    # each recomputing it independently: a request that falls through to
+    # containment — the expected path for a phrase-style query such as
+    # "autenticazione UGOV" — would otherwise normalise every name twice.
+    normalised_by_id = {
+        monitor_id: (normalise_name(name), fuse_name(name))
         for monitor_id, name in names.items()
-        if normalise_name(name) == normalised_wanted
-        or fuse_name(name) == fused_wanted
+    }
+
+    exact_matches = tuple(
+        (monitor_id, names[monitor_id])
+        for monitor_id, (normalised_name, fused_name) in normalised_by_id.items()
+        if normalised_name == normalised_wanted or fused_name == fused_wanted
     )
     if exact_matches:
         return MonitorResolution(requested_name, exact_matches, False, ())
 
     containment_matches = tuple(
-        (monitor_id, name)
-        for monitor_id, name in names.items()
-        if _names_contain_each_other(normalised_wanted, normalise_name(name))
-        or _names_contain_each_other(fused_wanted, fuse_name(name))
+        (monitor_id, names[monitor_id])
+        for monitor_id, (normalised_name, fused_name) in normalised_by_id.items()
+        if _names_contain_each_other(normalised_wanted, normalised_name)
+        or _names_contain_each_other(fused_wanted, fused_name)
     )
     return MonitorResolution(requested_name, containment_matches, False, ())
 
@@ -491,13 +539,20 @@ def _names_contain_each_other(left: str, right: str) -> bool:
 def _truncate_service_name(value: str) -> str:
     """Bound text that may later be included in a sentence, or a log line.
 
-    Control characters are replaced with a space before truncating: this text
+    Unsafe characters are replaced with a space before truncating: this text
     is untrusted (it comes from the model) and this is the one place every
     caller — the sentence builder and the adapter's diagnostic logging alike —
-    goes through, so it is the one place a newline can be stopped from forging
-    a second, unrelated log line.
+    goes through, so it is the one place a newline, a bidirectional override,
+    or a line/paragraph separator can be stopped from forging a second,
+    unrelated log line or scrambling how the sentence displays. The same
+    category set `_is_safe_monitor_name()` uses for monitor names, applied
+    here as a replacement rather than a rejection: unlike a monitor, a service
+    name always needs some text to show, even truncated or partly blanked.
     """
-    text = _CONTROL_CHARACTERS.sub(" ", str(value or ""))
+    text = "".join(
+        " " if unicodedata.category(character) in _UNSAFE_TEXT_CATEGORIES else character
+        for character in str(value or "")
+    )
     return text[:MAXIMUM_SERVICE_NAME_LENGTH]
 
 

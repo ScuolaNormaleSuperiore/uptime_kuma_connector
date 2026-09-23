@@ -27,25 +27,30 @@ if not __name__.startswith("cat.plugins."):
     _spec.loader.exec_module(package_plugin)  # noqa: E402  (path fix runs first, on purpose)
 
 
-def _top_level_python_modules() -> set[str]:
-    """Every `.py` file directly under the plugin root — not `tests/`, not `DEV/`."""
-    return {path.name for path in PLUGIN_ROOT.glob("*.py")}
+def _top_level_files() -> set[str]:
+    """Every file directly under the plugin root — not `tests/`, not `DEV/`.
+
+    Not just `*.py`: a non-Python runtime file (a changelog, say) left out of
+    both lists below would be just as silently missing from a release as an
+    unaccounted-for module, and this check exists to catch exactly that.
+    """
+    return {path.name for path in PLUGIN_ROOT.glob("*") if path.is_file()}
 
 
 class TestRuntimeFileList:
-    def test_every_top_level_module_is_accounted_for(self):
-        # The invariant this file exists for: a new top-level .py file must be
-        # a deliberate choice — shipped, or explicitly excluded — not an
-        # accident a build script misses because it only checks the files it
-        # already knows about.
+    def test_every_top_level_file_is_accounted_for(self):
+        # The invariant this file exists for: a new top-level file, `.py` or
+        # not, must be a deliberate choice — shipped, or explicitly excluded —
+        # not an accident a build script misses because it only checks the
+        # files it already knows about.
         accounted_for = set(package_plugin.RUNTIME_FILES) | set(
-            package_plugin.DEVELOPMENT_ONLY_MODULES
+            package_plugin.DEVELOPMENT_ONLY_FILES
         )
-        unaccounted = _top_level_python_modules() - accounted_for
+        unaccounted = _top_level_files() - accounted_for
 
         assert not unaccounted, (
             f"{sorted(unaccounted)} exist in the plugin folder but are listed "
-            "in neither RUNTIME_FILES nor DEVELOPMENT_ONLY_MODULES in "
+            "in neither RUNTIME_FILES nor DEVELOPMENT_ONLY_FILES in "
             "package-plugin.py. Decide whether each ships before adding it "
             "to one of the two lists."
         )
@@ -59,7 +64,7 @@ class TestRuntimeFileList:
 
     def test_runtime_and_development_only_lists_do_not_overlap(self):
         assert not (
-            set(package_plugin.RUNTIME_FILES) & set(package_plugin.DEVELOPMENT_ONLY_MODULES)
+            set(package_plugin.RUNTIME_FILES) & set(package_plugin.DEVELOPMENT_ONLY_FILES)
         )
 
     def test_settings_json_is_never_shipped(self):

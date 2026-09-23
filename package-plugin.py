@@ -8,11 +8,11 @@ Uptime Kuma API key in clear text.
 
 The list below is explicit rather than inferred by scanning the folder: an
 inferred list silently starts shipping any new top-level file the moment it
-is created. Its mirror is `tests/unit/test_packaging.py`, which fails when a
-top-level Python module exists in the plugin folder but is accounted for in
-neither `RUNTIME_FILES` nor `DEVELOPMENT_ONLY_MODULES` here — so a new module
-has to be placed in one list or the other on purpose, instead of being missed
-by a build that only checks the files it already knows about.
+is created. Its mirror is `tests/unit/test_packaging.py`, which fails when any
+top-level file exists in the plugin folder but is accounted for in neither
+`RUNTIME_FILES` nor `DEVELOPMENT_ONLY_FILES` here — so a new file, `.py` or
+not, has to be placed in one list or the other on purpose, instead of being
+missed by a build that only checks the files it already knows about.
 
     python package-plugin.py
 """
@@ -27,7 +27,9 @@ PLUGIN_NAME = "uptime_kuma_connector"
 PLUGIN_ROOT = Path(__file__).resolve().parent
 
 # Every file the plugin needs to load and run once installed. Nothing here is
-# specific to this machine or to a developer's checkout.
+# specific to this machine or to a developer's checkout. CHANGELOG.md is not
+# read by the core, but ships alongside README.md/LICENSE for whoever installs
+# the plugin from a public registry.
 RUNTIME_FILES = (
     "plugin.json",
     "requirements.txt",
@@ -37,15 +39,24 @@ RUNTIME_FILES = (
     "logo.png",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
 )
 
-# Top-level Python modules that exist for development only and are
-# deliberately never part of a release. Listed here — rather than merely
-# absent from RUNTIME_FILES — so the packaging test can tell "we decided not
-# to ship this" apart from "nobody has decided yet".
-DEVELOPMENT_ONLY_MODULES = (
+# Top-level files — Python modules and otherwise — that exist for development
+# only and are deliberately never part of a release. Listed here — rather than
+# merely absent from RUNTIME_FILES — so the packaging test can tell "we
+# decided not to ship this" apart from "nobody has decided yet".
+DEVELOPMENT_ONLY_FILES = (
     "run-tests.py",
     "package-plugin.py",
+    "pytest.ini",
+    ".gitignore",
+    # Gitignored, instance-specific, and may hold a real API key in clear
+    # text (see .gitignore). Present on a machine that has activated the
+    # plugin locally, absent otherwise — either way it must never ship;
+    # `test_settings_json_is_never_shipped` guards RUNTIME_FILES directly,
+    # and listing it here is what keeps it out of `unaccounted` below too.
+    "settings.json",
 )
 
 

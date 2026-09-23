@@ -1,6 +1,6 @@
 {
     "name": "Uptime Kuma Connector",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "min_cat_version": "1.9.2",
     "max_cat_version": "1.9.2",
     "description": "Lets the assistant answer whether an ICT service is currently up, reading monitor state from an Uptime Kuma instance on demand. Read-only: it writes nothing back.",
