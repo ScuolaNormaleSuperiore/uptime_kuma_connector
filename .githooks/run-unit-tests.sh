@@ -9,20 +9,22 @@ echo "[KUMA-CONN pre-commit] Running unit tests..." >&2
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-# `tests/unit` needs nothing but pytest and finishes in well under a second,
+# `.tests/unit` needs nothing but pytest and finishes in well under a second,
 # because it exercises `kuma_client.py`, which imports nothing from `cat` and
 # performs no I/O.
 #
-# There is no `tests/integration` yet. When it arrives it stays out of this
+# There is no `.tests/integration` yet. When it arrives it stays out of this
 # hook, for the same reason the sibling plugin keeps it out: it needs the
 # Cheshire Cat core importable, in practice the running container, and a commit
 # must not depend on Docker being up. Otherwise the hook either blocks
 # legitimate commits or skips in silence.
-test_target="tests/unit"
+test_target=".tests/unit"
 
+# A missing test folder fails, it does not skip: a silent skip is how a rename
+# or a bad checkout would turn this gate off without anyone noticing.
 if [ ! -d "$test_target" ]; then
-	echo "[KUMA-CONN pre-commit] $test_target not found, nothing to run." >&2
-	exit 0
+	echo "Commit blocked: $test_target not found, the unit tests cannot run." >&2
+	exit 1
 fi
 
 python_bin=""
@@ -60,7 +62,7 @@ fi
 if ! "$python_bin" -m pytest "$test_target"; then
 	echo >&2
 	echo "Commit blocked: unit tests failed." >&2
-	echo "Reproduce with: python -m pytest tests/unit" >&2
+	echo "Reproduce with: python -m pytest .tests/unit" >&2
 	exit 1
 fi
 

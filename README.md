@@ -97,8 +97,8 @@ Bounds that keep untrusted text out of the answer and the log:
 | `settings.py` | The admin settings model | Yes |
 | `run-tests.py` | Runs the unit tier locally and the full suite in the container | No |
 | `package-plugin.py` | Builds the release zip from an explicit file list | No |
-| `tests/unit/` | The pure logic. Plain `pytest`, no Cheshire Cat | No |
-| `tests/integration/` | Adapter behaviour, against a fake Cat and a mocked HTTP call | Yes |
+| `.tests/unit/` | The pure logic. Plain `pytest`, no Cheshire Cat | No |
+| `.tests/integration/` | Adapter behaviour, against a fake Cat and a mocked HTTP call | Yes |
 
 The split keeps every decision testable without a running Cat, and keeps the
 adapter thin enough to read.
@@ -234,6 +234,9 @@ python run-tests.py --integration   # adapter, inside the Cheshire Cat container
 python run-tests.py                 # both
 python run-tests.py --detailed      # ...listing every test name
 ```
+
+The tests live in the hidden `.tests/` folder on purpose: Cheshire Cat imports
+every `.py` it finds in a plugin folder, and its glob skips dot-folders.
 
 The unit tier runs anywhere — it exercises `kuma_client.py`, which imports
 nothing from `cat`. The integration tier needs the running core container,

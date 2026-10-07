@@ -2,13 +2,13 @@
 
 Cheshire Cat installs a plugin by unpacking this folder's contents into
 `cat/plugins/<name>/` on the target instance. What ships has to be exactly the
-runtime surface: including `DEV/`, `tests/`, or a `settings.json` that happens
+runtime surface: including `DEV/`, `.tests/`, or a `settings.json` that happens
 to exist on this machine would ship developer content or, worse, a real
 Uptime Kuma API key in clear text.
 
 The list below is explicit rather than inferred by scanning the folder: an
 inferred list silently starts shipping any new top-level file the moment it
-is created. Its mirror is `tests/unit/test_packaging.py`, which fails when any
+is created. Its mirror is `.tests/unit/test_packaging.py`, which fails when any
 top-level file exists in the plugin folder but is accounted for in neither
 `RUNTIME_FILES` nor `DEVELOPMENT_ONLY_FILES` here — so a new file, `.py` or
 not, has to be placed in one list or the other on purpose, instead of being
@@ -51,6 +51,10 @@ DEVELOPMENT_ONLY_FILES = (
     "package-plugin.py",
     "pytest.ini",
     ".gitignore",
+    # Local symlinks into the private DEV/ folder: git-ignored, present only on
+    # a developer machine, never part of a release.
+    "AGENTS.MD",
+    "CLAUDE.MD",
     # Gitignored, instance-specific, and may hold a real API key in clear
     # text (see .gitignore). Present on a machine that has activated the
     # plugin locally, absent otherwise — either way it must never ship;

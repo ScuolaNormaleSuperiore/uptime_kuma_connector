@@ -28,13 +28,13 @@ def parse_args() -> argparse.Namespace:
         "-u",
         "--unit",
         action="store_true",
-        help="run tests/unit with the current local Python interpreter",
+        help="run .tests/unit with the current local Python interpreter",
     )
     tier.add_argument(
         "-i",
         "--integration",
         action="store_true",
-        help="run only tests/integration inside the Cheshire Cat container",
+        help="run only .tests/integration inside the Cheshire Cat container",
     )
     parser.add_argument(
         "-d",
@@ -73,7 +73,7 @@ def run_local_unit_tests(detailed: bool) -> int:
         )
         return 1
 
-    arguments = [sys.executable, "-m", "pytest", "tests/unit"]
+    arguments = [sys.executable, "-m", "pytest", ".tests/unit"]
     if detailed:
         arguments.append("-v")
     return subprocess.run(arguments, cwd=REPO_ROOT, check=False).returncode
@@ -154,7 +154,7 @@ def run_container_tests(detailed: bool, integration_only: bool) -> int:
         SERVICE,
         *pytest_arguments(
             detailed=detailed,
-            path="tests/integration" if integration_only else None,
+            path=".tests/integration" if integration_only else None,
         ),
     ]
     environment = os.environ.copy()
