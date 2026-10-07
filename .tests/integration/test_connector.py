@@ -7,7 +7,7 @@ These need the core importable, because the module under test imports `cat.log`
 and `cat.mad_hatter.decorators` at import time. They never contact a live
 instance: the container is used as an interpreter, not as a server.
 
-    python run-tests.py --integration
+    python .tests/run-tests.py --integration
 
 The cases that belong here are:
 

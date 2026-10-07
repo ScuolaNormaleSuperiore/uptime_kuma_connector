@@ -1,12 +1,12 @@
-"""Guards the explicit file list in `package-plugin.py`.
+"""Guards the explicit file list in `.tools/package-plugin.py`.
 
 Unit tier: no `cat` import, plain `pytest`. `package-plugin.py` is a script,
 not an importable module — its name has a hyphen — so it is loaded here with
 `importlib` from its path rather than with a normal `import` statement.
 
 The tests live in the hidden `.tests/` folder, which the Cat's glob does not
-enter. Should it ever import this file anyway, loading and executing `package-plugin.py`'s module code has no reason to happen inside the
-core process, so it is guarded the same way the other test modules guard their
+enter. Should it ever import this file anyway, loading and executing
+`package-plugin.py`'s module code has no reason to happen inside the core process, so it is guarded the same way the other test modules guard their
 path fix: it runs under `pytest` and nowhere else.
 """
 
@@ -20,7 +20,7 @@ if not __name__.startswith("cat.plugins."):
     sys.path.insert(0, str(PLUGIN_ROOT))
 
     _spec = importlib.util.spec_from_file_location(
-        "package_plugin", PLUGIN_ROOT / "package-plugin.py"
+        "package_plugin", PLUGIN_ROOT / ".tools" / "package-plugin.py"
     )
     package_plugin = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(package_plugin)  # noqa: E402  (path fix runs first, on purpose)

@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVICE = "cheshire-cat-core"
 PLUGIN_IN_CONTAINER = "/app/cat/plugins/uptime_kuma_connector"
 
@@ -130,7 +130,7 @@ def run_container_tests(detailed: bool, integration_only: bool) -> int:
     compose_command = detect_compose_command()
     if compose_command is None:
         print("Neither 'docker compose' nor 'docker-compose' is available.", file=sys.stderr)
-        print("Run unit tests instead:  python run-tests.py --unit", file=sys.stderr)
+        print("Run unit tests instead:  python .tests/run-tests.py --unit", file=sys.stderr)
         return 1
 
     if not running_container_id(compose_command, project_directory):

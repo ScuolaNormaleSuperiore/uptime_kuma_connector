@@ -18,10 +18,11 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 # import graph starts.
 ENTRY_POINT = "uptime_kuma_connector"
 
-# Scripts that run nothing on import (guarded by `__main__`) and are never
-# imported by plugin code. Anything else the Cat would import must be reachable
-# from the entry point.
-LISTED_EXCEPTIONS = {"run-tests.py", "package-plugin.py"}
+# The development scripts live in hidden folders, out of the Cat's glob.
+DEVELOPMENT_SCRIPTS = {
+    ".tests/run-tests.py": "run-tests.py",
+    ".tools/package-plugin.py": "package-plugin.py",
+}
 
 
 def _cat_imports() -> set[str]:
@@ -65,13 +66,19 @@ class TestCatImportSurface:
         assert (PLUGIN_ROOT / ".tests").is_dir(), "the .tests/ folder is missing"
 
     def test_every_imported_file_is_needed_by_the_plugin(self):
-        unneeded = _cat_imports() - _reachable_from_entry_point() - LISTED_EXCEPTIONS
+        unneeded = _cat_imports() - _reachable_from_entry_point()
 
         assert not unneeded, (
             f"the Cat would import {sorted(unneeded)}, but no plugin code needs "
-            "them. Move them under .tests/ or list them in LISTED_EXCEPTIONS."
+            "them. Move them into a hidden folder such as .tests/ or .tools/."
         )
 
-    def test_listed_exceptions_still_exist(self):
-        for name in LISTED_EXCEPTIONS:
-            assert (PLUGIN_ROOT / name).is_file(), f"'{name}' is listed but missing"
+    def test_development_scripts_live_in_hidden_folders(self):
+        imported = _cat_imports()
+
+        for hidden_path, name in DEVELOPMENT_SCRIPTS.items():
+            assert (PLUGIN_ROOT / hidden_path).is_file(), f"'{hidden_path}' is missing"
+            assert hidden_path not in imported, f"the Cat would import '{hidden_path}'"
+            assert not (PLUGIN_ROOT / name).exists(), (
+                f"'{name}' is back in the plugin root, where the Cat imports it"
+            )

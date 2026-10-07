@@ -95,8 +95,8 @@ Bounds that keep untrusted text out of the answer and the log:
 | `kuma_client.py` | All decision logic: URL, auth header, `/metrics` parsing, name resolution, the sentence for the model | **No** |
 | `uptime_kuma_connector.py` | The Cheshire Cat adapter: settings, HTTP, the tool | Yes |
 | `settings.py` | The admin settings model | Yes |
-| `run-tests.py` | Runs the unit tier locally and the full suite in the container | No |
-| `package-plugin.py` | Builds the release zip from an explicit file list | No |
+| `.tests/run-tests.py` | Runs the unit tier locally and the full suite in the container | No |
+| `.tools/package-plugin.py` | Builds the release zip from an explicit file list | No |
 | `.tests/unit/` | The pure logic. Plain `pytest`, no Cheshire Cat | No |
 | `.tests/integration/` | Adapter behaviour, against a fake Cat and a mocked HTTP call | Yes |
 
@@ -138,7 +138,7 @@ The plugin folder is `uptime_kuma_connector`. Install it under
 `cat/plugins/` — see the
 [Cheshire Cat 1.x docs](https://cheshire-cat-ai.github.io/docs/1/) for how
 your deployment does that, typically by placing the folder there or
-uploading the zip built with `python package-plugin.py`.
+uploading the zip built with `python .tools/package-plugin.py`.
 
 1. Open the admin panel, **Plugins**, find **Uptime Kuma Connector**, switch
    it on.
@@ -229,18 +229,22 @@ field either way.
 ## Testing
 
 ```bash
-python run-tests.py --unit          # pure logic, local interpreter
-python run-tests.py --integration   # adapter, inside the Cheshire Cat container
-python run-tests.py                 # both
-python run-tests.py --detailed      # ...listing every test name
+python .tests/run-tests.py                  # everything, in the Cheshire Cat container
+python .tests/run-tests.py --unit (-u)      # pure logic, local interpreter, no Docker
+python .tests/run-tests.py --integration (-i)  # adapter only, in the container
+python .tests/run-tests.py --detailed (-d)  # list every test name; combines with the others
+python .tools/package-plugin.py             # build the release zip in dist/
 ```
 
 The tests live in the hidden `.tests/` folder on purpose: Cheshire Cat imports
 every `.py` it finds in a plugin folder, and its glob skips dot-folders.
 
+`--unit` and `--integration` are mutually exclusive; with neither, the full
+suite runs in the container. This plugin has no database tier.
+
 The unit tier runs anywhere — it exercises `kuma_client.py`, which imports
 nothing from `cat`. The integration tier needs the running core container,
-since the adapter imports `cat` at import time; `run-tests.py` prints how to
+since the adapter imports `cat` at import time; `.tests/run-tests.py` prints how to
 start it when it is not running. Neither tier contacts a live Uptime Kuma
 instance.
 

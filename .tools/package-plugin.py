@@ -14,7 +14,7 @@ top-level file exists in the plugin folder but is accounted for in neither
 not, has to be placed in one list or the other on purpose, instead of being
 missed by a build that only checks the files it already knows about.
 
-    python package-plugin.py
+    python .tools/package-plugin.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import zipfile
 from pathlib import Path
 
 PLUGIN_NAME = "uptime_kuma_connector"
-PLUGIN_ROOT = Path(__file__).resolve().parent
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 # Every file the plugin needs to load and run once installed. Nothing here is
 # specific to this machine or to a developer's checkout. CHANGELOG.md is not
@@ -47,8 +47,6 @@ RUNTIME_FILES = (
 # merely absent from RUNTIME_FILES — so the packaging test can tell "we
 # decided not to ship this" apart from "nobody has decided yet".
 DEVELOPMENT_ONLY_FILES = (
-    "run-tests.py",
-    "package-plugin.py",
     "pytest.ini",
     ".gitignore",
     # Local symlinks into the private DEV/ folder: git-ignored, present only on
