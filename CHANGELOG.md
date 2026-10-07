@@ -8,6 +8,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The tests and the development scripts moved to hidden folders (`.tests/`, `.tools/`), so Cheshire Cat no longer imports them
 - Added a layout test that fails when the Cat would import a file the plugin does not need
 - Updated the documentation and the test commands
+- The closest-name diagnostic on a `not_monitored` answer compares at most 200 names, so it no longer adds latency on large instances
+- The shared HTTP client is closed when the plugin is deactivated
+- Workers stuck in name resolution are capped at eight; past that a call answers `unknown` at once
 
 ## [1.0.1] - 2026-09-23
 - AI Code Review and bug-fixing
