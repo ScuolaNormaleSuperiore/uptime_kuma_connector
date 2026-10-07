@@ -972,6 +972,18 @@ class TestTheInstanceUrlValidator:
     def build(self, url):
         return settings_module.UptimeKumaConnectorSettings(base_url=url)
 
+    @pytest.mark.parametrize("url", ["http://host:abc", "http://host:99999"])
+    def test_an_invalid_port_is_refused(self, url):
+        # Regression: the port was never read, so both were saved and every
+        # question then answered `unknown`.
+        with pytest.raises(ValidationError):
+            self.build(url)
+
+    def test_a_valid_port_is_kept(self):
+        assert self.build("https://kuma.example.org:3001/x").base_url == (
+            "https://kuma.example.org:3001/x"
+        )
+
     def test_a_trailing_slash_is_removed(self):
         # The banality that costs an afternoon: joined with "/metrics" it makes
         # "//metrics", and some reverse proxies answer 404 rather than

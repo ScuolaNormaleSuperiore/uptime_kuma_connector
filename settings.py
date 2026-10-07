@@ -178,6 +178,17 @@ class UptimeKumaConnectorSettings(BaseModel):
                 "API key"
             )
 
+        # `urlsplit()` raises for a bad port only when `.port` is read, so
+        # without this line `host:abc` and `host:99999` were saved and then
+        # answered `unknown` on every question.
+        try:
+            parts.port
+        except ValueError:
+            raise ValueError(
+                "La porta indicata nell'URL non è valida: deve essere un "
+                "numero da 0 a 65535"
+            ) from None
+
         if parts.query or parts.fragment:
             raise ValueError(
                 "L'URL deve essere solo quello dell'istanza, senza parametri "
