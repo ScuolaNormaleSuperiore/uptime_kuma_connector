@@ -119,6 +119,36 @@ class TestPluginLoads:
 
         connector.activated.function(object())
 
+    def test_deactivation_closes_the_shared_http_client(self, monkeypatch):
+        # Regression: the core drops the module on deactivation without
+        # closing the client, so each cycle abandoned a connection pool.
+        closed = []
+
+        class FakeClient:
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(connector, "_http_client", FakeClient())
+
+        connector.deactivated.function(object())
+
+        assert closed == [True]
+
+    def test_deactivation_does_not_raise_when_closing_or_logging_fails(
+        self, monkeypatch
+    ):
+        class BrokenClient:
+            def close(self):
+                raise RuntimeError("socket already gone")
+
+        def broken_log(_message):
+            raise RuntimeError("log sink unavailable")
+
+        monkeypatch.setattr(connector, "_http_client", BrokenClient())
+        monkeypatch.setattr(connector.log, "info", broken_log)
+
+        connector.deactivated.function(object())
+
     def test_an_internal_import_error_is_not_redirected_to_top_level_modules(
         self, tmp_path, monkeypatch
     ):
@@ -754,6 +784,53 @@ class TestServiceStatusBehaviour:
 
         release.set()
 
+    def test_abandoned_pre_connect_workers_are_capped(self, monkeypatch):
+        """Regression: with an unresponsive resolver every question started one
+        more thread blocked in name resolution, because each abandoned worker
+        returned its slot at the deadline. Past the ceiling a call answers
+        `unknown` at once without starting a thread; when a worker ends, its
+        place is available again."""
+        release = Event()
+        started = []
+
+        class HangingConnect:
+            def __enter__(self):
+                started.append(1)
+                release.wait(10)
+                return FakeHttpResponse(TestServiceStatusBehaviour.VALID_PAYLOAD)
+
+            def __exit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(connector, "MAXIMUM_ABANDONED_METRICS_WORKERS", 2)
+        monkeypatch.setattr(connector, "_abandoned_workers", 0)
+        monkeypatch.setattr(
+            connector, "_metrics_worker_slots", BoundedSemaphore(4)
+        )
+        monkeypatch.setattr(
+            connector._http_client, "stream", lambda *_args, **_kwargs: HangingConnect()
+        )
+        configuration = {
+            "base_url": "https://kuma.example.org",
+            "api_key": "read-key",
+            "request_timeout_seconds": 1,
+        }
+        unknown = connector.kuma_client.unreachable_sentence("VPN")
+
+        assert self.call(configuration) == unknown
+        assert self.call(configuration) == unknown
+        assert len(started) == 2
+        assert connector._abandoned_workers == 2
+
+        assert self.call(configuration) == unknown
+        assert len(started) == 2, "a third worker was started past the ceiling"
+
+        release.set()
+        deadline = time.monotonic() + 3
+        while connector._abandoned_workers and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert connector._abandoned_workers == 0
+
     def test_not_monitored_logs_at_most_three_close_names(self, monkeypatch):
         payload = "\n".join(
             f'monitor_status{{monitor_id="{number}",monitor_name="{name}"}} 1'
@@ -776,6 +853,37 @@ class TestServiceStatusBehaviour:
         assert sentence.startswith("Non risulta alcun controllo")
         diagnostic = next(line for line in lines if "Closest monitor names" in line)
         assert diagnostic.count(",") == 2
+
+    def test_the_close_name_diagnostic_compares_a_bounded_number_of_names(
+        self, monkeypatch
+    ):
+        # Regression: the diagnostic compared every monitor name inside the
+        # turn, about 1 s at 20,000 monitors, only to write one log line.
+        payload = "\n".join(
+            f'monitor_status{{monitor_id="{number}",monitor_name="Servizio {number}"}} 1'
+            for number in range(1, 1001)
+        )
+        comparisons = []
+        real_matcher = connector.SequenceMatcher
+
+        def counting_matcher(*args, **kwargs):
+            comparisons.append(1)
+            return real_matcher(*args, **kwargs)
+
+        monkeypatch.setattr(connector, "SequenceMatcher", counting_matcher)
+        monkeypatch.setattr(
+            connector._http_client, "stream", lambda *_args, **_kwargs: FakeHttpResponse(payload)
+        )
+        monkeypatch.setattr(connector.log, "warning", lambda _line: None)
+        connector._reported_configuration = None
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"},
+            "Archivio",
+        )
+
+        assert sentence.startswith("Non risulta alcun controllo")
+        assert len(comparisons) == connector.MAXIMUM_NAMES_COMPARED_FOR_DIAGNOSTIC
 
     def test_a_url_shaped_monitor_name_resolves_instead_of_not_monitored(
         self, monkeypatch

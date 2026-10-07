@@ -166,7 +166,11 @@ connector is enabled only when the URL and the key are both filled in.**
 
 The connector requests an uncompressed response; a proxy that returns another
 content encoding yields `unknown`. At most four requests run at once; further
-calls also return `unknown` immediately.
+calls also return `unknown` immediately. A request that never connects
+(an unresponsive DNS resolver) gives its slot back at the deadline, but its
+thread stays blocked until the resolver gives up: at most eight such threads
+are tolerated, and past that every call returns `unknown` without starting
+another.
 
 ### Uptime Kuma: URL istanza
 

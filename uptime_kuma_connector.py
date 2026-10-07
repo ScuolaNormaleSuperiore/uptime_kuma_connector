@@ -36,6 +36,12 @@ BYTES_PER_KIBIBYTE = 1024
 RAW_RESPONSE_CHUNK_SIZE = 64 * BYTES_PER_KIBIBYTE
 MAXIMUM_IN_FLIGHT_METRICS_REQUESTS = 4
 
+# The closest-name diagnostic runs inside the turn, in front of a waiting user,
+# and only feeds a log line. Measured on 2026-10-07: about 1 s at 20,000
+# monitors. Past this many names the rest are not compared, so its cost has a
+# ceiling regardless of how large the instance or the response limit is.
+MAXIMUM_NAMES_COMPARED_FOR_DIAGNOSTIC = 200
+
 # Reused across calls rather than opened and torn down per request. httpx's
 # own top-level functions (httpx.stream(), httpx.get(), ...) each create and
 # close a temporary client, paying a fresh TCP/TLS handshake on every single
@@ -52,6 +58,15 @@ _http_client = httpx.Client()
 # This is a bulkhead, not a cache: a saturated slot answers `unknown` now and
 # no state about any monitor survives the call.
 _metrics_worker_slots = BoundedSemaphore(MAXIMUM_IN_FLIGHT_METRICS_REQUESTS)
+
+# A worker abandoned before it connected gives its slot back at the deadline,
+# yet its thread stays blocked in name resolution, which has no timeout. The
+# slots alone would then let every new question start one more such thread
+# while a resolver is unresponsive. This counts the abandoned ones, and past
+# the ceiling a call answers `unknown` at once instead of starting another.
+MAXIMUM_ABANDONED_METRICS_WORKERS = 8
+_abandoned_workers = 0
+_abandoned_workers_lock = Lock()
 
 
 class MetricsResponseTooLarge(Exception):
@@ -172,7 +187,12 @@ def _fetch_metrics(
     thread is doing real work against the instance, and a fresh call must not
     pile a second connection on top of it. `release_slot_once()` guards
     against the two sides racing to release the same slot twice.
+
+    The reclaimed worker is counted as abandoned until its thread really ends,
+    and past `MAXIMUM_ABANDONED_METRICS_WORKERS` no new worker is started.
     """
+    if _abandoned_workers >= MAXIMUM_ABANDONED_METRICS_WORKERS:
+        raise MetricsRequestCapacityExceeded
     if not _metrics_worker_slots.acquire(blocking=False):
         raise MetricsRequestCapacityExceeded
 
@@ -181,6 +201,8 @@ def _fetch_metrics(
     connected = Event()
     release_lock = Lock()
     released = False
+    finished = False
+    abandoned = False
 
     def release_slot_once() -> None:
         nonlocal released
@@ -205,6 +227,26 @@ def _fetch_metrics(
             result.put((False, failure))
         finally:
             release_slot_once()
+            _finish_worker()
+
+    def _finish_worker() -> None:
+        nonlocal finished
+        global _abandoned_workers
+        with release_lock:
+            finished = True
+            if abandoned:
+                with _abandoned_workers_lock:
+                    _abandoned_workers -= 1
+
+    def _abandon_worker() -> None:
+        nonlocal abandoned
+        global _abandoned_workers
+        with release_lock:
+            if finished:
+                return
+            abandoned = True
+            with _abandoned_workers_lock:
+                _abandoned_workers += 1
 
     worker = Thread(target=fetch, daemon=True, name="uptime-kuma-metrics")
     try:
@@ -217,6 +259,7 @@ def _fetch_metrics(
         cancelled.set()
         if not connected.is_set():
             release_slot_once()
+            _abandon_worker()
         raise MetricsRequestDeadlineExceeded
 
     succeeded, value = result.get_nowait()
@@ -335,10 +378,14 @@ def alias_map(settings: UptimeKumaConnectorSettings) -> dict:
 
 
 def _closest_monitor_names(service_name: str, names: tuple[str, ...]) -> tuple[str, ...]:
-    """Return at most three names useful to an administrator diagnosing a miss."""
+    """Return at most three names useful to an administrator diagnosing a miss.
+
+    Only the first `MAXIMUM_NAMES_COMPARED_FOR_DIAGNOSTIC` names are compared:
+    this is a hint for a log line, and it must not make the answer wait.
+    """
     wanted = kuma_client.normalise_name(service_name)
     ranked = sorted(
-        names,
+        names[:MAXIMUM_NAMES_COMPARED_FOR_DIAGNOSTIC],
         key=lambda name: SequenceMatcher(
             None, wanted, kuma_client.normalise_name(name)
         ).ratio(),
@@ -599,3 +646,20 @@ def activated(plugin):
         "[uptime_kuma_connector] plugin activated. The service_status tool reads "
         "Uptime Kuma on demand; no flow hook or cache is used."
     )
+
+
+@plugin
+def deactivated(plugin):
+    """Close the shared HTTP client when the plugin is switched off.
+
+    The core drops this plugin's modules from `sys.modules` on deactivation and
+    imports them afresh on the next activation, which builds a new `_http_client`.
+    Without this hook each cycle (and each auto-reload during development) would
+    abandon a client together with its connection pool. A failure here must not
+    get in the way of the core's own deactivation.
+    """
+    try:
+        _http_client.close()
+    except Exception:
+        pass
+    _safe_log("info", "[uptime_kuma_connector] plugin deactivated.")
