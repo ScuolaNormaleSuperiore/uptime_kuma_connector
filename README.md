@@ -51,8 +51,8 @@ alias map. The plugin resolves it, in order:
 Comparisons are case-insensitive, whitespace-collapsed, and read `-`, `.` and
 `_` both as separators and as noise to remove — so `Portale-XX` matches
 `Portale XX`, and `UGOV` matches `U-GOV - Autenticazione` with no alias
-needed. A leading `http://` or `https://` is also ignored on every side of a
-comparison — `www.sns.it` in the alias map matches `www.sns.it`,
+needed. An `http://` or `https://` scheme is also ignored, wherever it
+appears in the text, on every side of a comparison — `www.sns.it` in the alias map matches `www.sns.it`,
 `https://www.sns.it`, or `http://www.sns.it` in the question equally; `www.`
 itself is kept, only the scheme is noise. Alias keys are folded the same way,
 but matching stays exact after normalisation: `Portale Demo` never reaches
@@ -177,8 +177,8 @@ another.
 Just the instance root, e.g. `https://kuma.example.org` or
 `http://uptime-kuma:3001` on a container network — the plugin appends
 `/metrics` itself. Validated strictly: a trailing slash is stripped, a
-sub-path is kept, query parameters, fragments and embedded credentials are
-refused.
+sub-path is kept; a missing or unsupported scheme, a missing host, an invalid
+port, query parameters, fragments and embedded credentials are refused.
 
 **HTTP is accepted**, with a log warning whenever the configuration
 changes — the key travels as `base64(":" + key)`, an encoding, not
@@ -217,7 +217,7 @@ monitor's URL, `/dashboard/<id>`.
 
 One alias may group up to ten monitor ids (an ordinary name match is capped
 at five) — past that, the field still saves, but that alias will always
-resolve as `ambiguous`, and a save/reload logs why. A malformed line is
+resolve as `ambiguous`, and the first question after saving logs why. A malformed line is
 discarded on its own — never disables the field — and logged; a repeated id
 on one line collapses to one; a conflicting alias keeps its first
 definition. Read the log when an alias does not work: the panel accepts the
@@ -285,17 +285,20 @@ starts with `[uptime_kuma_connector]`.
 | `HTTPStatusError 401` | The API key is wrong, expired, or revoked |
 | `HTTPStatusError 404` | The URL does not point at an Uptime Kuma instance, or at a valid sub-path |
 | `HTTPStatusError 301` / `307` | The instance redirects — **redirects are not followed on purpose**, so fix the configured URL to the one the instance actually serves |
-| `ConnectError` / `ConnectTimeout` | The host is unreachable from the container |
-| `ReadTimeout` | The instance is reachable but did not answer within the configured timeout |
+| `ConnectError` | The host refuses the connection or its name does not resolve from the container |
+| `MetricsRequestDeadlineExceeded` | No complete answer within the configured timeout: a slow instance, an address that drops packets, or a name lookup that hangs |
+| `MetricsResponseTooLarge` | The response is above the configured size limit, or the proxy returned a compressed body |
+| `MetricsRequestCapacityExceeded` | Earlier requests are still unfinished, so no new one was opened |
 
 Nothing else is logged on that path: not the URL, the headers, the body, or
 the key.
 
 ## Limitations
 
-- **`pending` and `maintenance` have never been seen in the wild.** They are
+- **`pending` and `maintenance` have never been captured.** They are
   implemented and unit-tested against Uptime Kuma's documented format, but
-  no captured fixture contains them — only `up` and `down` have.
+  no fixture contains them — only `up` and `down` do. `pending` was seen once,
+  briefly, on the development instance; `maintenance` never.
 - **`/metrics` carries no timestamp** — the plugin cannot tell whether a
   value is a second or an hour old. A paused monitor was confirmed to
   disappear from `/metrics` rather than report a stale state.
