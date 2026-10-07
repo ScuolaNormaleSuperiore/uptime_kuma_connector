@@ -23,6 +23,28 @@ without guessing.
 6. The model combines that sentence with the support procedure from the
    knowledge base; the tool never answers the user directly.
 
+### Making live status visible in answers
+
+`service_status` is a non-direct tool: it gives the language model a live
+availability result, then lets the model combine that result with the relevant
+help-desk procedure. This keeps an answer useful whether the service is
+available or unavailable.
+
+The final C.A.T. prompt should preserve the `{tools_output}` placeholder and
+instruct the model to give a known `service_status` result priority over generic
+documentation. For example:
+
+> When the user reports a problem with a service and the executed tool context
+> contains a `service_status` result that says the requested service is active,
+> unavailable, pending, or under maintenance, state that live result explicitly
+> in the answer. Use it before giving procedural guidance: if the service is
+> active, continue with likely user-side causes without suggesting another
+> availability check.
+
+Do not set this tool to `return_direct=True`: doing so would return only the
+monitoring sentence and prevent C.A.T. from adding the appropriate help-desk
+guidance.
+
 ### The four outcomes
 
 | Outcome | When | What the model is told |
