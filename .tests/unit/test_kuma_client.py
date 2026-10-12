@@ -652,6 +652,104 @@ class TestFindMonitor:
         assert resolution.requested_name == "VPN [forged] reversed"
 
 
+class TestGenericWordFallback:
+    """A generic word around a service name must not hide the monitor.
+
+    Regression for the 2026-10-12 production finding: `programma Planning` and
+    `portale Esse3` answered `not_monitored` although both services had a
+    monitor, while `Planning` alone resolved.
+    """
+
+    NAMES = {
+        1: "Easy academy (planning)",
+        2: "Oracle ESSE3 Cineca",
+        3: "Esse3 Roma",
+        4: "Portale Studenti",
+        5: "Studenti DB",
+    }
+
+    def test_an_italian_generic_word_does_not_hide_the_monitor(self):
+        for query in ("programma Planning", "il programma di planning"):
+            resolution = kuma_client.find_monitor(self.NAMES, query)
+            assert resolution.matches == ((1, "Easy academy (planning)"),), query
+            assert resolution.used_fallback, query
+
+    def test_an_english_generic_word_does_not_hide_the_monitor(self):
+        for query in ("planning program", "the Planning system"):
+            resolution = kuma_client.find_monitor(self.NAMES, query)
+            assert resolution.matches == ((1, "Easy academy (planning)"),), query
+            assert resolution.used_fallback, query
+
+    def test_portale_esse3_finds_every_esse3_monitor(self):
+        resolution = kuma_client.find_monitor(self.NAMES, "portale Esse3")
+
+        assert [monitor_id for monitor_id, _ in resolution.matches] == [2, 3]
+        assert resolution.used_fallback
+
+    def test_a_request_of_only_generic_words_matches_nothing(self):
+        for query in ("programma", "sito servizio", "the system"):
+            resolution = kuma_client.find_monitor(self.NAMES, query)
+            assert resolution.matches == (), query
+            assert not resolution.used_fallback, query
+
+    def test_an_unknown_word_is_never_dropped(self):
+        # "pisa" is not generic: dropping what no monitor contains would answer
+        # with the state of the Roma monitor.
+        resolution = kuma_client.find_monitor(self.NAMES, "Esse3 Pisa")
+
+        assert resolution.matches == ()
+
+    def test_a_generic_word_inside_the_monitor_name_still_counts(self):
+        # "portale" is part of "Portale Studenti", so it is not dropped for that
+        # monitor, and the ordinary passes already resolve it: no fallback.
+        resolution = kuma_client.find_monitor(self.NAMES, "portale studenti")
+
+        assert (4, "Portale Studenti") in resolution.matches
+        assert not resolution.used_fallback
+
+    def test_a_request_that_already_matched_never_reaches_the_fallback(self):
+        for query in ("Planning", "esse3 roma"):
+            assert not kuma_client.find_monitor(self.NAMES, query).used_fallback
+
+    def test_an_alias_still_wins_over_the_fallback(self):
+        aliases, _ = kuma_client.parse_alias_map("programma Planning: 5")
+        resolution = kuma_client.find_monitor(
+            self.NAMES, "programma Planning", aliases
+        )
+
+        assert resolution.used_alias
+        assert not resolution.used_fallback
+        assert resolution.matches == ((5, "Studenti DB"),)
+
+    def test_more_matches_than_the_ceiling_are_still_ambiguous(self):
+        names = {i: f"Esse3 nodo {i}" for i in range(1, 8)}
+        payload = "\n".join(
+            f'monitor_status{{monitor_id="{i}",monitor_name="{n}"}} 1'
+            for i, n in names.items()
+        )
+        parsed, statuses = kuma_client.parse_monitor_metrics(payload)
+        resolution = kuma_client.find_monitor(parsed, "portale Esse3")
+
+        outcome, _ = kuma_client.describe_resolution(resolution, statuses)
+        assert outcome == kuma_client.OUTCOME_AMBIGUOUS
+
+    def test_the_sentence_is_the_one_a_plain_match_produces(self):
+        # The fallback is a log label, never a different answer for the model.
+        payload = (
+            'monitor_status{monitor_id="1",monitor_name="Easy academy (planning)"} 1'
+        )
+        names, statuses = kuma_client.parse_monitor_metrics(payload)
+
+        _, plain = kuma_client.describe_resolution(
+            kuma_client.find_monitor(names, "Planning"), statuses
+        )
+        _, fallback = kuma_client.describe_resolution(
+            kuma_client.find_monitor(names, "programma Planning"), statuses
+        )
+
+        assert fallback == plain.replace("Planning", "programma Planning")
+
+
 class TestMonitoredServiceNames:
     def test_names_keep_the_metric_order_and_exclude_ids(self):
         assert kuma_client.monitored_service_names(

@@ -595,6 +595,8 @@ def service_status(service_name: str, cat) -> str:
         resolution_source = (
             "alias"
             if resolution.used_alias
+            else "fallback"
+            if resolution.used_fallback
             else "name"
             if resolution.matches
             else "none"

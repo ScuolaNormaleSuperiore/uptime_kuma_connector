@@ -68,7 +68,14 @@ alias map. The plugin resolves it, in order:
 1. an exact alias from the settings;
 2. an exact monitor name;
 3. containment either way — the query inside a monitor name, the name inside
-   the query, or the same words in a different order.
+   the query, or the same words in a different order;
+4. as a last resort, containment again with generic words removed from the
+   request — `programma Planning` reaches `Easy academy (planning)`. The list
+   is closed and covers Italian and English (`programma`, `portale`, `sito`,
+   `servizio`, `the`, `portal`, `website`, …); a word that is not on it is
+   never dropped, and a generic word the monitor's own name contains is kept.
+   For another language, use the alias map. This match is logged as
+   `resolution: fallback` and changes nothing in what the model is told.
 
 Comparisons are case-insensitive, whitespace-collapsed, and read `-`, `.` and
 `_` both as separators and as noise to remove — so `Portale-XX` matches
@@ -293,7 +300,9 @@ the tool and used its result. A success line adds the outcome:
 ```
 
 `resolution: alias` means the settings map was used, `name` means automatic
-name matching, and `none` means nothing matched. Every plugin log line
+name matching, `fallback` means a match reached only after generic words were
+dropped from the request (worth a look: an alias makes it explicit), and
+`none` means nothing matched. Every plugin log line
 starts with `[uptime_kuma_connector]`.
 
 ### When it does not work, read the failure line

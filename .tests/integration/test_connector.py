@@ -467,6 +467,23 @@ class TestServiceStatusBehaviour:
         assert any("outcome: known, resolution: alias" in line for line in lines)
         assert not any("17" in line or "Accesso remoto" in line for line in lines)
 
+    def test_a_fallback_match_is_identified_in_the_success_log(self, monkeypatch):
+        lines = []
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(self.VALID_PAYLOAD),
+        )
+        monkeypatch.setattr(connector.log, "info", lines.append)
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"},
+            "servizio VPN",
+        )
+
+        assert sentence == "Il servizio servizio VPN risulta attivo."
+        assert any("outcome: known, resolution: fallback" in line for line in lines)
+
     def test_a_broken_alias_is_reported_once_per_configuration(self, monkeypatch):
         # A standing broken alias is a fixed configuration fault: every call
         # that resolves through it reproduces the identical warning, which is

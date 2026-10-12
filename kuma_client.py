@@ -61,6 +61,27 @@ MAXIMUM_MONITOR_NAME_LENGTH = 160
 # name (an acronym such as "PA") is unaffected.
 MINIMUM_CONTAINMENT_LENGTH = 3
 
+# Words a user (or the model, copying the user) puts around a service name
+# without being part of it: "programma Planning", "portale di Esse3", "the
+# Esse3 portal". They are dropped from a request only in the last resolution
+# pass, only when the monitor being compared does not itself contain the word,
+# and never so far that no distinctive word is left. Closed list, Italian and
+# English only, on purpose: a word that is unknown to every monitor is NOT
+# generic — dropping it would answer "Esse3 Pisa" with the state of "Esse3
+# Roma". For another language, the alias map is the answer.
+_GENERIC_WORDS = frozenset(
+    {
+        # Italian
+        "programma", "portale", "sito", "servizio", "sistema", "piattaforma",
+        "applicazione", "applicativo", "pagina", "il", "lo", "la", "le", "gli",
+        "un", "una", "di", "del", "dello", "della", "dei", "degli", "delle",
+        "per",
+        # English
+        "program", "portal", "site", "website", "service", "system",
+        "platform", "application", "app", "page", "the", "of", "my", "for",
+    }
+)
+
 # Turned into spaces before comparing names, so that a hyphen, a dot or an
 # underscore used as a word separator reads as one. Every comparison is then
 # made twice, against this form and against the spaceless form built by
@@ -113,12 +134,17 @@ class MonitorResolution:
     with an invalid id is a configuration failure, not proof that the requested
     service is unmonitored. The adapter will log partial misses; `describe_status`
     will turn a total alias miss into `unknown`.
+
+    `used_fallback` marks a match reached only after generic words were dropped
+    from the request. It is read by the adapter for its log line and by nothing
+    else: the sentence for the model is the same either way.
     """
 
     requested_name: str
     matches: tuple[tuple[int, str], ...]
     used_alias: bool
     missing_alias_ids: tuple[int, ...]
+    used_fallback: bool = False
 
 
 def normalise_name(value: str) -> str:
@@ -490,7 +516,43 @@ def find_monitor(
         if _names_contain_each_other(normalised_wanted, normalised_name)
         or _names_contain_each_other(fused_wanted, fused_name)
     )
-    return MonitorResolution(requested_name, containment_matches, False, ())
+    if containment_matches:
+        return MonitorResolution(requested_name, containment_matches, False, ())
+
+    # Last pass, reached only where the answer would otherwise be
+    # `not_monitored`: retry with the generic words removed, monitor by monitor.
+    generic_matches = tuple(
+        (monitor_id, names[monitor_id])
+        for monitor_id, (normalised_name, fused_name) in normalised_by_id.items()
+        if _names_contain_each_other(
+            _without_generic_words(normalised_wanted, normalised_name),
+            normalised_name,
+        )
+        or _names_contain_each_other(
+            _without_generic_words(fused_wanted, fused_name), fused_name
+        )
+    )
+    return MonitorResolution(
+        requested_name, generic_matches, False, (), used_fallback=bool(generic_matches)
+    )
+
+
+def _without_generic_words(wanted: str, name: str) -> str:
+    """The request minus its generic words, as seen from one monitor's name.
+
+    A generic word that the monitor's own name contains is kept: it is part of
+    that service's name ("Portale Studenti"). Returns an empty string — which
+    `_names_contain_each_other()` never matches — when nothing was dropped (the
+    earlier passes already decided that case) or when only generic words would
+    remain, because a request made of nothing but "portale sito" identifies no
+    service.
+    """
+    words = wanted.split()
+    name_words = set(name.split())
+    kept = [w for w in words if w not in _GENERIC_WORDS or w in name_words]
+    if len(kept) == len(words) or all(w in _GENERIC_WORDS for w in kept):
+        return ""
+    return " ".join(kept)
 
 
 def _squash(value: str) -> str:
