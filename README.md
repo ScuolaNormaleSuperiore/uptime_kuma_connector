@@ -67,8 +67,8 @@ alias map. The plugin resolves it, in order:
 
 1. an exact alias from the settings;
 2. an exact monitor name;
-3. containment either way — the query inside a monitor name, the name inside
-   the query, or the same words in a different order;
+3. containment either way, on whole words — the query inside a monitor name,
+   the name inside the query, or the same words in a different order;
 4. as a last resort, containment again with generic words removed from the
    request — `programma Planning` reaches `Easy academy (planning)`. The list
    is closed and covers Italian and English (`programma`, `portale`, `sito`,
@@ -80,7 +80,8 @@ alias map. The plugin resolves it, in order:
 Comparisons are case-insensitive, whitespace-collapsed, and read `-`, `.` and
 `_` both as separators and as noise to remove — so `Portale-XX` matches
 `Portale XX`, and `UGOV` matches `U-GOV - Autenticazione` with no alias
-needed. An `http://` or `https://` scheme is also ignored, wherever it
+needed. Brackets, slashes, commas and similar punctuation are always word
+boundaries, so `planning` is a word of `Easy academy (planning)`. An `http://` or `https://` scheme is also ignored, wherever it
 appears in the text, on every side of a comparison — `www.sns.it` in the alias map matches `www.sns.it`,
 `https://www.sns.it`, or `http://www.sns.it` in the question equally; `www.`
 itself is kept, only the scheme is noise. Alias keys are folded the same way,
@@ -98,8 +99,10 @@ Bounds that keep untrusted text out of the answer and the log:
   characters, is ignored — a URL-shaped name is not: Uptime Kuma defaults an
   HTTP(S) monitor's display name to its URL until renamed, and that is an
   ordinary name, not unsafe text;
-- containment by substring needs at least three characters on both sides;
-  shorter queries need a whole-word match;
+- containment is on whole words and needs at least three characters on both
+  sides, so a monitor `Mail` does not answer for `Gmail` or `Webmail`, and a
+  word typed half way (`esse` for `ESSE3`) is not a match — use an alias for
+  that; shorter queries need a whole-word match;
 - a monitor name that normalises to nothing is never matched heuristically
   (an explicit alias can still reach it).
 
@@ -241,7 +244,9 @@ Esse3, Segreteria online: 14, 15, 16
 VPN, GlobalProtect: 17
 ```
 
-Blank lines and `#` comments are ignored. The id is the number in the
+Blank lines and `#` comments are ignored. The line is split at its last `:`,
+so an alias may be an address with its scheme (`https://www.sns.it: 12`); any
+other `:` on the alias side makes the line malformed. The id is the number in the
 monitor's URL, `/dashboard/<id>`.
 
 One alias may group up to ten monitor ids (an ordinary name match is capped
@@ -323,6 +328,16 @@ starts with `[uptime_kuma_connector]`.
 
 Nothing else is logged on that path: not the URL, the headers, the body, or
 the key.
+
+A different line means the instance **answered** but its body held no readable
+monitor line (a proxy page, an instance with no monitors, a changed format):
+
+```text
+[uptime_kuma_connector] the monitoring endpoint answered but no readable monitor line was found; the status is unknown.
+```
+
+The answer is `unknown`, and neither `request succeeded` nor `no monitor
+matches` is logged — look at what the URL really serves, not at the alias map.
 
 ## Limitations
 

@@ -467,6 +467,36 @@ class TestServiceStatusBehaviour:
         assert any("outcome: known, resolution: alias" in line for line in lines)
         assert not any("17" in line or "Accesso remoto" in line for line in lines)
 
+    def test_a_response_without_monitor_lines_is_not_logged_as_a_success(
+        self, monkeypatch
+    ):
+        # Regression for the 2026-10-12 review: a 200 carrying no readable
+        # monitor line (a proxy page, say) was logged as "succeeded" and then as
+        # "no monitor matches", which sent the administrator to the alias map.
+        info_lines, warning_lines = [], []
+        monkeypatch.setattr(
+            connector._http_client,
+            "stream",
+            lambda *_args, **_kwargs: FakeHttpResponse(
+                "<html><body>Login required</body></html>"
+            ),
+        )
+        monkeypatch.setattr(connector.log, "info", info_lines.append)
+        monkeypatch.setattr(connector.log, "warning", warning_lines.append)
+
+        sentence = self.call(
+            {"base_url": "https://kuma.example.org", "api_key": "read-key"}
+        )
+
+        assert sentence == connector.kuma_client.unreachable_sentence("VPN")
+        assert not any("succeeded" in line for line in info_lines)
+        assert not any("no monitor matches" in line for line in warning_lines)
+        assert any("no readable monitor line" in line for line in warning_lines)
+        assert not any(
+            "Login required" in line or "kuma.example.org" in line or "read-key" in line
+            for line in info_lines + warning_lines
+        )
+
     def test_a_fallback_match_is_identified_in_the_success_log(self, monkeypatch):
         lines = []
         monkeypatch.setattr(

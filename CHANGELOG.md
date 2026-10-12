@@ -6,6 +6,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.3] - 2026-10-12
 - Fixed: a generic word around a service name (`programma Planning`, `portale Esse3`) no longer hides the monitor; Italian and English generic words are dropped in a last matching pass, logged as `resolution: fallback`
+- Fixed: a monitor name is no longer matched inside another word (`Mail` for `Gmail`); containment is on whole words, and brackets and slashes count as word boundaries
+- Fixed: an alias written with `https://` in the alias map is no longer discarded
+- Fixed: a response with no readable monitor line is no longer logged as a success, and no longer as "no monitor matches"
 - Added `DOC/MATCH_SERVIZI.md`, a guide to how a request is matched to a monitor
 - Updated the documentation
 

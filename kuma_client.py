@@ -90,8 +90,23 @@ _GENERIC_WORDS = frozenset(
 # which needs it to vanish. Removing them outright — what this did until
 # 2026-09-17 — served only the second case and answered `not_monitored` to the
 # first, which is a certainty the plugin had no right to state.
-_SEPARATOR_CHARACTERS = str.maketrans("-._", "   ")
-_REMOVED_SEPARATORS = str.maketrans("", "", "-._")
+#
+# Brackets, slashes, commas and the like are word boundaries too, and always
+# become a space, in both forms. Containment is decided on whole words (see
+# `_names_contain_each_other()`), so a monitor called "Easy academy (planning)"
+# has to expose `planning` as a word of its own: with the parentheses glued to
+# it, "planning" would no longer be found in it. Added 2026-10-12.
+_WORD_BOUNDARY_PUNCTUATION = "()[]{}<>/\\,;:|\"+&!?"
+_SEPARATOR_CHARACTERS = str.maketrans(
+    "-._" + _WORD_BOUNDARY_PUNCTUATION,
+    " " * (3 + len(_WORD_BOUNDARY_PUNCTUATION)),
+)
+_REMOVED_SEPARATORS = str.maketrans(
+    {
+        **{ord(character): None for character in "-._"},
+        **{ord(character): " " for character in _WORD_BOUNDARY_PUNCTUATION},
+    }
+)
 
 # An `http(s)://` scheme carries no identity a user, an alias, or a monitor's
 # own display name would rely on to tell one service from another — it is
@@ -237,7 +252,17 @@ def parse_alias_map(text: str) -> tuple[dict[str, tuple[int, ...]], tuple[str, .
             problems.append(f"line {number}: no ':' separating aliases from ids")
             continue
 
-        raw_aliases, raw_ids = line.split(":", 1)
+        # Split at the LAST colon: a monitor id never contains one, while an
+        # alias may, as the colon of `https://`. Splitting at the first one cut
+        # `https://www.sns.it: 42` after `https` and discarded the line.
+        raw_aliases, raw_ids = line.rsplit(":", 1)
+
+        # What is left of the scheme must not hold a colon of its own. Without
+        # this, `VPN: 17: 18` would silently become the alias `VPN: 17` with
+        # id 18 instead of the malformed line it is.
+        if ":" in _URL_SCHEME.sub("", raw_aliases):
+            problems.append(f"line {number}: more than one ':' separating aliases from ids")
+            continue
 
         # Squashed rather than merely normalised: an alias is matched exactly,
         # and "U-GOV", "Ugov" and "U GOV" have to be one key, not three. Since
@@ -587,10 +612,14 @@ def _names_contain_each_other(left: str, right: str) -> bool:
     if not left or not right:
         return False
 
+    # Padded with spaces so a phrase is contained only on word boundaries:
+    # "mail" is not inside "gmail" or "webmail", while "easy academy" is inside
+    # "easy academy planning". Plain character containment answered for a
+    # different service whenever a short monitor name sat inside a longer word.
     if (
         len(left) >= MINIMUM_CONTAINMENT_LENGTH
         and len(right) >= MINIMUM_CONTAINMENT_LENGTH
-        and (left in right or right in left)
+        and (f" {left} " in f" {right} " or f" {right} " in f" {left} ")
     ):
         return True
     return set(left.split()).issubset(right.split()) or set(right.split()).issubset(

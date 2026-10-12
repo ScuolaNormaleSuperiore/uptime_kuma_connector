@@ -394,6 +394,17 @@ def _closest_monitor_names(service_name: str, names: tuple[str, ...]) -> tuple[s
     return tuple(ranked[:3])
 
 
+def _resolution_source(resolution: kuma_client.MonitorResolution) -> str:
+    """How the request reached its monitors, as the success log line names it."""
+    if resolution.used_alias:
+        return "alias"
+    if resolution.used_fallback:
+        return "fallback"
+    if resolution.matches:
+        return "name"
+    return "none"
+
+
 def _report_resolution_problems(
     resolution: kuma_client.MonitorResolution, names: dict
 ) -> None:
@@ -586,21 +597,22 @@ def service_status(service_name: str, cat) -> str:
             kuma_client.basic_auth_header(api_key),
         )
         names, statuses = kuma_client.parse_monitor_metrics(payload)
+        if not names:
+            # The endpoint answered, but nothing in the body was a readable
+            # monitor line: a proxy page, an instance with no monitors, a format
+            # that changed, or every name refused by the parser. Neither the
+            # "succeeded" line nor "no monitor matches" below would be true, and
+            # the second would send an administrator looking at the alias map.
+            # Nothing of the body or the URL is logged.
+            _safe_log(
+                "warning",
+                "[uptime_kuma_connector] the monitoring endpoint answered but no "
+                "readable monitor line was found; the status is unknown."
+            )
+            return kuma_client.unreachable_sentence(service_name)
         resolution = kuma_client.find_monitor(names, service_name, aliases)
-        if names:
-            outcome, sentence = kuma_client.describe_resolution(resolution, statuses)
-        else:
-            outcome = kuma_client.OUTCOME_UNKNOWN
-            sentence = kuma_client.unreachable_sentence(service_name)
-        resolution_source = (
-            "alias"
-            if resolution.used_alias
-            else "fallback"
-            if resolution.used_fallback
-            else "name"
-            if resolution.matches
-            else "none"
-        )
+        outcome, sentence = kuma_client.describe_resolution(resolution, statuses)
+        resolution_source = _resolution_source(resolution)
         # `sentence` is already correct at this point. The two calls below are
         # best-effort diagnostics for an administrator, not part of answering
         # the question: a failure in either one (a log sink in timeout, a full

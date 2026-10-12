@@ -652,6 +652,104 @@ class TestFindMonitor:
         assert resolution.requested_name == "VPN [forged] reversed"
 
 
+class TestAliasMapWithAScheme:
+    """An alias copied from a browser, scheme included, must be read.
+
+    Regression for the 2026-10-12 review: the line was split at the first
+    colon, which for `https://www.sns.it: 42` is the one after `https`.
+    """
+
+    def test_an_alias_with_a_scheme_is_read_as_the_same_alias_without_one(self):
+        aliases, problems = kuma_client.parse_alias_map(
+            "https://www.sns.it: 42\nhttp://www.example.org, Sito: 7, 8"
+        )
+
+        assert problems == ()
+        assert aliases["wwwsnsit"] == (42,)
+        assert aliases["wwwexampleorg"] == (7, 8)
+        assert aliases["sito"] == (7, 8)
+
+    def test_the_two_spellings_are_one_key(self):
+        with_scheme, _ = kuma_client.parse_alias_map("https://www.sns.it: 42")
+        without_scheme, _ = kuma_client.parse_alias_map("www.sns.it: 42")
+
+        assert with_scheme == without_scheme
+
+    def test_a_second_colon_after_the_alias_is_still_a_malformed_line(self):
+        # Splitting at the last colon must not turn `VPN: 17: 18` into the
+        # alias `VPN: 17` pointing at monitor 18.
+        aliases, problems = kuma_client.parse_alias_map("VPN: 17: 18\nEsse3: 14")
+
+        assert aliases == {"esse3": (14,)}
+        assert len(problems) == 1
+        assert "line 1" in problems[0]
+
+    def test_a_request_with_a_scheme_reaches_an_alias_written_with_one(self):
+        aliases, _ = kuma_client.parse_alias_map("https://www.sns.it: 42")
+
+        resolution = kuma_client.find_monitor(
+            {42: "Sito istituzionale"}, "www.sns.it", aliases
+        )
+
+        assert resolution.used_alias
+        assert resolution.matches == ((42, "Sito istituzionale"),)
+
+
+class TestContainmentIsOnWholeWords:
+    """A monitor name must not answer for a request that merely contains it.
+
+    Regression for the 2026-10-12 review: containment compared characters, so
+    with a monitor called `Mail` the requests `Gmail`, `Hotmail` and `Webmail`
+    reported its state as `known` instead of `not_monitored`.
+    """
+
+    NAMES = {
+        1: "Mail",
+        2: "Web",
+        3: "VPN - GlobalProtect",
+        4: "U-GOV - Autenticazione Cineca",
+        5: "Portale XX",
+        6: "Easy academy (planning)",
+        7: "Oracle ESSE3 Cineca",
+        8: "Moodle [prod] / didattica",
+    }
+
+    def matched(self, query):
+        return [name for _, name in kuma_client.find_monitor(self.NAMES, query).matches]
+
+    def test_a_short_monitor_name_inside_a_longer_word_does_not_match(self):
+        for query in ("Gmail", "Hotmail", "Webmail", "webinar"):
+            assert self.matched(query) == [], query
+
+    def test_a_part_of_a_word_does_not_match(self):
+        # The cost of the rule, stated: a word typed half way is not a match.
+        assert self.matched("esse") == []
+        assert self.matched("esse3") == ["Oracle ESSE3 Cineca"]
+
+    def test_the_phrase_and_acronym_cases_still_match(self):
+        assert self.matched("UGOV") == ["U-GOV - Autenticazione Cineca"]
+        assert self.matched("autenticazione UGOV") == ["U-GOV - Autenticazione Cineca"]
+        assert self.matched("Portale-XX") == ["Portale XX"]
+        assert self.matched("Easy academy") == ["Easy academy (planning)"]
+        assert self.matched("vpn globalprotect") == ["VPN - GlobalProtect"]
+
+    def test_brackets_and_slashes_are_word_boundaries(self):
+        # Without this, the whole-word rule would stop finding `planning` in
+        # "Easy academy (planning)", which is how a real monitor is named.
+        assert self.matched("Planning") == ["Easy academy (planning)"]
+        assert self.matched("programma Planning") == ["Easy academy (planning)"]
+        assert self.matched("moodle prod") == ["Moodle [prod] / didattica"]
+        assert self.matched("didattica") == ["Moodle [prod] / didattica"]
+
+    def test_an_alias_key_with_brackets_still_matches_its_request(self):
+        aliases, _ = kuma_client.parse_alias_map("Moodle (prod): 8")
+
+        resolution = kuma_client.find_monitor(self.NAMES, "moodle prod", aliases)
+
+        assert resolution.used_alias
+        assert resolution.matches == ((8, "Moodle [prod] / didattica"),)
+
+
 class TestGenericWordFallback:
     """A generic word around a service name must not hide the monitor.
 
